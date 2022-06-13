@@ -1,4 +1,4 @@
-from math import log2
+from math import log2, ceil
 import numpy as np
 from .utils import(
     log2_accum_dims,
@@ -37,7 +37,7 @@ class GreedyOrderFinder:
         common_bonds = self.contain_bonds[i] & self.contain_bonds[j]
         contract_bonds = set([bond for bond in common_bonds if self.tn.bond_tensors[bond].issubset(contracted_tensors)])
         result_bonds = all_bonds - contract_bonds
-        factor = min(log2(self.tn.max_bitstring), final_qubits_num(self.tn.num_fq, contracted_tensors))
+        factor = min(self.tn.log2_max_bitstring, final_qubits_num(self.tn.num_fq, contracted_tensors))
         sc = log2_accum_dims(self.tn.bond_dims, result_bonds)
         sc += factor
         if 'min_dim' in self.strategy:
@@ -67,7 +67,13 @@ class GreedyOrderFinder:
         common_bonds = self.contain_bonds[i] & self.contain_bonds[j]
         contract_bonds = set([bond for bond in common_bonds if self.tn.bond_tensors[bond].issubset(contracted_tensors)])
         result_bonds = all_bonds - contract_bonds
-        factor = min(log2(self.tn.max_bitstring), final_qubits_num(self.tn.num_fq, contracted_tensors))
+    
+        l_num_fq = final_qubits_num(self.tn.num_fq, self.contain_tensors[i])
+        r_num_fq = final_qubits_num(self.tn.num_fq, self.contain_tensors[j])
+        num_fq = l_num_fq + r_num_fq
+        factor = min(self.tn.log2_max_bitstring, num_fq)
+        if l_num_fq < self.tn.log2_max_bitstring and r_num_fq < self.tn.log2_max_bitstring and num_fq > ceil(self.tn.log2_max_bitstring):
+            factor += num_fq - ceil(self.tn.log2_max_bitstring)
         sc = log2_accum_dims(self.tn.bond_dims, result_bonds)
         tc = log2_accum_dims(self.tn.bond_dims, all_bonds) if contract_bonds else log2_accum_dims(self.tn.bond_dims, all_bonds) - 1
         sc += factor

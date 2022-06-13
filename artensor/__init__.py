@@ -8,7 +8,6 @@ from .core import (
     random_tree_sa,
     tree_optimize,
     score_fn,
-    subtree_optimize
 )
 
 from .greedy import GreedyOrderFinder

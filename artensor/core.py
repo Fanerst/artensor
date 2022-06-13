@@ -1,63 +1,18 @@
 import sys
 from traceback import print_exc
-from math import log10, log2
+from math import log10, log2, ceil
 from copy import deepcopy
 import numpy as np
 import multiprocessing as mp
 import time
+
+from .greedy import GreedyOrderFinder
 from .utils import(
     log2_accum_dims,
     final_qubits_num,
     log10sumexp2,
     log2sumexp2
 )
-
-
-def bonds_out(tensor_bonds, part):
-    """
-    Calculating resulting bonds after contracting tensors in part
-    """
-    all_bonds = set().union(*[tensor_bonds[tensor_id] for tensor_id in part])
-    other_bonds = set().union(*[tensor_bonds[tensor_id] for tensor_id in range(len(tensor_bonds)) if tensor_id not in part])
-    out_bonds = all_bonds & other_bonds
-    return out_bonds
-
-
-def get_tc_sc_inner(tn, part):
-    """
-    Calculating complexity of specific tensors in part
-    return tc, sc, resulting_bonds and mc
-    """
-    assert len(part) == 1
-    bonds1 = set(tn.tensor_bonds[list(part)[0]])# bonds_out(tn.tensor_bonds, part)
-    factor = min(log2(tn.max_bitstring), final_qubits_num(tn.num_fq, part))
-    return 0.0, log2_accum_dims(tn.bond_dims, bonds1) + factor, bonds1, 0.0
-
-
-def get_tc_sc_contraction(tn, left, right):
-    """
-    Calculating complexity of contracting tensors in left and right
-    return tc, sc, resulting_bonds and mc
-    """
-    contracted_tensors = left.contain_tensors | right.contain_tensors
-    all_bonds = left.contain_bonds | right.contain_bonds
-    common_bonds = left.contain_bonds & right.contain_bonds
-    contract_bonds = set([bond for bond in common_bonds if tn.bond_tensors[bond].issubset(contracted_tensors)])
-    result_bonds = all_bonds - contract_bonds
-    factor = min(log2(tn.max_bitstring), final_qubits_num(tn.num_fq, contracted_tensors))
-    tc = log2_accum_dims(tn.bond_dims, all_bonds) if contract_bonds else log2_accum_dims(tn.bond_dims, all_bonds) - 1 # not -1, fix later
-    sc = log2_accum_dims(tn.bond_dims, result_bonds)
-    tc += factor
-    sc += factor
-    mc = log2sumexp2([left.sc, right.sc, sc])
-    return tc, sc, result_bonds, mc, contract_bonds, all_bonds
-
-
-def score_fn(tc, sc, mc, sc_target=30.0, sc_weight=2.0, arithmetic_intensity=32.0):
-    """
-    Score function for finding order
-    """
-    return log10(arithmetic_intensity * 10 ** mc + 10 ** tc) + sc_weight * log10(2) * max(0, sc - sc_target)
 
 
 class AbstractTensorNetwork:
@@ -89,6 +44,7 @@ class AbstractTensorNetwork:
         else:
             self.num_fq = [0 for i in range(len(tensor_bonds))]
         self.max_bitstring = max_bitstring
+        self.log2_max_bitstring = log2(max_bitstring)
         self.slicing_bonds = {}
         self.slicing_bond_tensors = {}
         pass
@@ -120,6 +76,11 @@ class AbstractTensorNetwork:
             self.tensor_bonds[tensor_id].append(bond)
         return tensors
 
+    def sub_tensor_network(self, tensor_lists, tensor_bonds=None):
+        sub_num_fq = [final_qubits_num(self.num_fq, tensor_list) for tensor_list in tensor_lists]
+        sub_tn = AbstractTensorNetwork(tensor_bonds, self.bond_dims, [], self.max_bitstring)
+        sub_tn.num_fq = sub_num_fq
+        return sub_tn
 
 class ContractionVertex:
     def __init__(self, contain_tensors, tn, left, right) -> None:
@@ -159,8 +120,64 @@ class ContractionVertex:
         else:
             return True
 
+
+def bonds_out(tensor_bonds, part):
+    """
+    Calculating resulting bonds after contracting tensors in part
+    """
+    all_bonds = set().union(*[tensor_bonds[tensor_id] for tensor_id in part])
+    other_bonds = set().union(*[tensor_bonds[tensor_id] for tensor_id in range(len(tensor_bonds)) if tensor_id not in part])
+    out_bonds = all_bonds & other_bonds
+    return out_bonds
+
+
+def get_tc_sc_inner(tn:AbstractTensorNetwork, part):
+    """
+    Calculating complexity of specific tensors in part
+    return tc, sc, resulting_bonds and mc
+    """
+    assert len(part) == 1
+    bonds1 = set(tn.tensor_bonds[list(part)[0]])# bonds_out(tn.tensor_bonds, part)
+    factor = min(tn.log2_max_bitstring, final_qubits_num(tn.num_fq, part))
+    return 0.0, log2_accum_dims(tn.bond_dims, bonds1) + factor, bonds1, 0.0
+
+
+def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, right:ContractionVertex):
+    """
+    Calculating complexity of contracting tensors in left and right
+    return tc, sc, resulting_bonds and mc
+    """
+    contracted_tensors = left.contain_tensors | right.contain_tensors
+    all_bonds = left.contain_bonds | right.contain_bonds
+    common_bonds = left.contain_bonds & right.contain_bonds
+    contract_bonds = set([bond for bond in common_bonds if tn.bond_tensors[bond].issubset(contracted_tensors)])
+    result_bonds = all_bonds - contract_bonds
+
+    l_num_fq = final_qubits_num(tn.num_fq, left.contain_tensors)
+    r_num_fq = final_qubits_num(tn.num_fq, right.contain_tensors)
+    num_fq = l_num_fq + r_num_fq
+    assert final_qubits_num(tn.num_fq, contracted_tensors) == num_fq
+    factor = min(tn.log2_max_bitstring, num_fq)
+    if l_num_fq < tn.log2_max_bitstring and r_num_fq < tn.log2_max_bitstring and factor < num_fq:
+        factor += num_fq - ceil(tn.log2_max_bitstring)
+    elif max(l_num_fq, r_num_fq) > tn.log2_max_bitstring:
+        factor += max(0, min(l_num_fq, r_num_fq) - len(contract_bonds))
+    tc = log2_accum_dims(tn.bond_dims, all_bonds) if contract_bonds else log2_accum_dims(tn.bond_dims, all_bonds) - 1 # not -1, fix later
+    sc = log2_accum_dims(tn.bond_dims, result_bonds)
+    tc += factor
+    sc += factor
+    mc = log2sumexp2([left.sc, right.sc, sc])
+    return tc, sc, result_bonds, mc, contract_bonds, all_bonds
+
+
+def score_fn(tc, sc, mc, sc_target=30.0, sc_weight=2.0, arithmetic_intensity=32.0):
+    """
+    Score function for finding order
+    """
+    return log10(arithmetic_intensity * 10 ** mc + 10 ** tc) + sc_weight * log10(2) * max(0, sc - sc_target)
+
 class ContractionTree:
-    def __init__(self, tn, order, seed=0) -> None:
+    def __init__(self, tn:AbstractTensorNetwork, order, seed=0) -> None:
         """
         Class of contraction tree
         Parameters:
@@ -912,5 +929,12 @@ def subtree_optimize(vertex:ContractionVertex, tree:ContractionTree, size, beta,
         tc_tree, sc_tree, mc_tree = tree.tree_complexity(local_tree, vertex)
         reference_score = score_fn(tc_tree, sc_tree, mc_tree, sc_target)
         for leaf in local_tree_leaves:
+            print(leaf.contain_tensors)
             print(leaf.contain_bonds)
+        sub_tensor_bonds = [leaf.contain_bonds for leaf in local_tree_leaves]
+        sub_tensor_lists = [leaf.contain_tensors for leaf in local_tree_leaves]
+        sub_tn = tree.tn.sub_tensor_network(sub_tensor_lists, sub_tensor_bonds)
+        greedy_finder = GreedyOrderFinder(sub_tn)
+        order_new, tc_new, sc_new, mc_new = greedy_finder(seed=rng.randint(len(local_tree_leaves)))
+        
         

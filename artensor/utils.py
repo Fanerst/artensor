@@ -1,11 +1,10 @@
-from math import log10, log2
 import numpy as np
 
 def log2_accum_dims(bond_dims, bonds):
     """
     Return log2 of production of bond dimensions of given bonds
     """
-    return log2(np.prod([bond_dims[bond] for bond in bonds]))
+    return np.sum(np.log2([bond_dims[bond] for bond in bonds]))
 
 def final_qubits_num(num_fq, contain_tensors):
     """

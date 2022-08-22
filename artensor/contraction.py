@@ -679,7 +679,10 @@ def contraction_scheme_sparse_einsum(ctree:ContractionTree, bitstrings=None, sc_
     return contraction_scheme, tensor_bonds[i], tmp_bitstrings
 
 
-def tensor_contraction_einsum(tensors, contraction_scheme):
+def tensor_contraction_einsum(tensors, contraction_scheme, scientific_notation=False):
+    if scientific_notation:
+        factor = torch.tensor(0, dtype=tensors[0].dtype, device=tensors[0].device)
+
     for step in contraction_scheme:
         i, j = step[0]
         batch_i, batch_j = step[2]
@@ -753,8 +756,15 @@ def tensor_contraction_einsum(tensors, contraction_scheme):
                 print_exc()
                 sys.exit(1)
             tensors[j] = []
+        if scientific_notation:
+            norm_factor = tensors[i].abs().max()
+            tensors[i] /= norm_factor
+            factor += torch.log10(norm_factor)
 
-    return tensors[i]
+    if scientific_notation:
+        return factor, tensors[i]
+    else:
+        return tensors[i]
 
 
 def tensor_contraction_sparsestate_1(tensors, contraction_scheme):
@@ -953,7 +963,7 @@ def contraction_scheme_sparse_einsum_1(ctree:ContractionTree, bitstrings=None, s
                 #     batch_seq[idx].append([x])
                 #     batch_seq[1-idx].append(seq)
                 # print(i, j, tensor_info[i][0], tensor_info[j][0], len(tensor_info[i][1]), len(tensor_info[j][1]), t_combine, t_determine)
-                if np.log2(len(tmp_bitstrings_rep)) + len(bond_i) <= sc_target and np.log2(len(tmp_bitstrings_rep)) + len(bond_j) <= sc_target:
+                if np.log2(len(tmp_bitstrings_rep)) + max(len(bond_i), len(bond_j)) <= sc_target-1: # and np.log2(len(tmp_bitstrings_rep)) + len(bond_j) <= sc_target:
                     if idx == 0:
                         batch_seq = [
                             [torch.cat([torch.tensor(batch_seq[0][i] * len(batch_seq[1][i])) for i in range(len(batch_seq[0]))])],
@@ -967,8 +977,6 @@ def contraction_scheme_sparse_einsum_1(ctree:ContractionTree, bitstrings=None, s
                     cat_batch_flag = True
                 else:
                     batch_seq = [[torch.tensor(i) for i in batch_seq[0]], [torch.tensor(i) for i in batch_seq[1]]]
-                if (i, j) == (0, 182):
-                    print(i, j, batch_seq)
 
             assert len(tmp_bitstrings_rep) == len(tmp_bitstrings)
 

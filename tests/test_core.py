@@ -7,7 +7,7 @@ from artensor import (
 )
 
 # ContractionTree, ContractionVertex, AbstractTensorNetwork class tests 
-def test_oridinary_tn():
+def test_hyper_tn():
     eq, shapes = 'ab,ac,ad,bc,be,cf,de,df,ef->', [(2,2)]*9
     order = [(0, 1), (3, 5), (0, 3), (4, 8), (0, 4), (6, 7), (0, 6), (0, 2)]
     eq_sep = eq.strip('->').split(',')
@@ -20,7 +20,7 @@ def test_oridinary_tn():
     ctree = ContractionTree(tensor_network, order, 0)
     print('tree results', ctree.tree_complexity())
 
-def test_hyper_tn():
+def test_oridinary_tn():
     eq, shapes = 'abc,ade,cdf,bgh,egi,fhi->', [(2,2,2)] * 6
     order = [(0,1), (3,4), (0,3), (2,6), (0,2), (5,7), (0,5), (0,8)]
     eq_sep = eq.strip('->').split(',')

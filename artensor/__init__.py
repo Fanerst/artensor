@@ -1,13 +1,16 @@
 from .core import (
     ContractionTree,
+    ContractionVertex,
     AbstractTensorNetwork,
-    tree_sa_slicing,
-    tree_sa,
     log10sumexp2,
     simulate_annealing,
     random_tree_sa,
     tree_optimize,
+    tree_update,
+    subtree_update,
     score_fn,
+    GreedyOrderFinderNew,
+    find_order
 )
 
 from .greedy import GreedyOrderFinder

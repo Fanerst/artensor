@@ -6,7 +6,6 @@ import numpy as np
 import multiprocessing as mp
 import time
 
-from .greedy import GreedyOrderFinder
 from .utils import(
     log2_accum_dims,
     final_qubits_num,
@@ -138,8 +137,8 @@ def get_tc_sc_inner(tn:AbstractTensorNetwork, part):
     """
     assert len(part) == 1
     bonds1 = set(tn.tensor_bonds[list(part)[0]])# bonds_out(tn.tensor_bonds, part)
-    factor = min(tn.log2_max_bitstring, final_qubits_num(tn.num_fq, part))
-    return 0.0, log2_accum_dims(tn.bond_dims, bonds1) + factor, bonds1, 0.0
+    multiconfig_factor = min(tn.log2_max_bitstring, final_qubits_num(tn.num_fq, part))
+    return 0.0, log2_accum_dims(tn.bond_dims, bonds1) + multiconfig_factor, bonds1, 0.0
 
 
 def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, right:ContractionVertex):
@@ -156,16 +155,18 @@ def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, righ
     l_num_fq = final_qubits_num(tn.num_fq, left.contain_tensors)
     r_num_fq = final_qubits_num(tn.num_fq, right.contain_tensors)
     num_fq = l_num_fq + r_num_fq
-    assert final_qubits_num(tn.num_fq, contracted_tensors) == num_fq
-    factor = min(tn.log2_max_bitstring, num_fq)
-    if l_num_fq < tn.log2_max_bitstring and r_num_fq < tn.log2_max_bitstring and factor < num_fq:
-        factor += num_fq - ceil(tn.log2_max_bitstring)
-    elif max(l_num_fq, r_num_fq) > tn.log2_max_bitstring:
-        factor += max(0, min(l_num_fq, r_num_fq) - len(contract_bonds))
+    # assert final_qubits_num(tn.num_fq, contracted_tensors) == num_fq
+    multiconfig_factor = min(tn.log2_max_bitstring, num_fq)
+    batch_contraction_penalty = 0.0
+    if l_num_fq < tn.log2_max_bitstring and r_num_fq < tn.log2_max_bitstring and multiconfig_factor < num_fq:
+        batch_contraction_penalty = num_fq - ceil(tn.log2_max_bitstring)
+    elif max(l_num_fq, r_num_fq) >= tn.log2_max_bitstring:
+        batch_contraction_penalty = max(0, min(l_num_fq, r_num_fq) - len(contract_bonds))
+
     tc = log2_accum_dims(tn.bond_dims, all_bonds) if contract_bonds else log2_accum_dims(tn.bond_dims, all_bonds) - 1 # not -1, fix later
     sc = log2_accum_dims(tn.bond_dims, result_bonds)
-    tc += factor
-    sc += factor
+    tc += multiconfig_factor + batch_contraction_penalty
+    sc += multiconfig_factor
     mc = log2sumexp2([left.sc, right.sc, sc])
     return tc, sc, result_bonds, mc, contract_bonds, all_bonds
 
@@ -252,6 +253,14 @@ class ContractionTree:
         """
         _, sc, _ = self.tree_complexity()
         slicing_bonds_pool = set().union(*[vertex.contain_bonds for vertex in self.tree.values() if vertex.sc == sc])
+        # if len(slicing_bonds_pool) == 0:
+        #     for vertex in self.tree.values():
+        #         if vertex.sc == sc:
+        #             print(vertex.contain_tensors)
+        #             print(vertex.contain_bonds)
+        #             print(vertex.contract_bonds)
+        #             print(vertex.tc, vertex.sc)
+        assert len(slicing_bonds_pool) > 0
         return slicing_bonds_pool
 
     def slicing(self, bond):
@@ -557,6 +566,159 @@ def determine_old_order(vertex, local_tree_leaves):
         assert first_contract == [1, 2]
         return [(1,2), (0,1)]
 
+
+class GreedyOrderFinderNew:
+    def __init__(self, tensor_network:AbstractTensorNetwork) -> None:
+        """
+        Class of greedy order finder
+        Parameters:
+        -----------
+        tensor_network: AbstractTensorNetwork class
+            the underlying tensor network
+        -----------
+        """
+        self.tn = tensor_network
+
+    def _construct_pair_info(self):
+        """
+        Construct the pair contraction info
+        """
+        self.pair_info = {}.fromkeys(self.potential_contraction_pair)
+        for pair in self.pair_info.keys():
+            self.pair_info[pair] = self._update_pair_info(pair)
+
+    def _update_pair_info(self, pair):
+        """
+        Update the pair contraction info
+        """
+        i, j = pair
+        contracted_tensors = self.current_branch[i].contain_tensors | self.current_branch[j].contain_tensors
+        all_bonds = self.current_branch[i].contain_bonds | self.current_branch[j].contain_bonds
+        common_bonds = self.current_branch[i].contain_bonds & self.current_branch[i].contain_bonds
+        contract_bonds = set([bond for bond in common_bonds if self.tn.bond_tensors[bond].issubset(contracted_tensors)])
+        result_bonds = all_bonds - contract_bonds
+        multiconfig_factor = min(self.tn.log2_max_bitstring, final_qubits_num(self.tn.num_fq, contracted_tensors))
+        sc = log2_accum_dims(self.tn.bond_dims, result_bonds)
+        sc += multiconfig_factor
+        if 'min_dim' in self.strategy:
+            value = sc
+        elif 'max_reduce' in self.strategy:
+            value = sc - (log2_accum_dims(self.tn.bond_dims, self.current_branch[i].contain_bonds) + log2_accum_dims(self.tn.bond_dims, self.current_branch[j].contain_bonds))
+        else:
+            value = 1.0
+        return value
+
+    def _pair_select(self, rng):
+        """
+        select a pair for contraction
+        """
+        min_value = min(self.pair_info.values())
+        min_pairs = [pair for pair in self.pair_info.keys() if self.pair_info[pair] == min_value]
+        pair = min_pairs[rng.choice(range(len(min_pairs)))]
+        return pair
+    
+    def contract(self, pair):
+        """
+        Contract a pair
+        """
+        i, j = pair
+        left = self.current_branch[i]
+        right = self.current_branch[j]
+        merged_contain_tensors = left.contain_tensors | right.contain_tensors
+        parent = ContractionVertex(merged_contain_tensors, self.tn, left, right)
+        self.tree[merged_contain_tensors] = parent
+        self.current_branch[i] = parent
+        
+        pairs_add = []
+        for neigh in self.tensor_neighbors[j]:
+            pair_eliminate = (min(j, neigh), max(j, neigh))
+            self.pair_info.pop(pair_eliminate)
+            if neigh != i and neigh not in self.tensor_neighbors[i]:
+                pairs_add.append((min(i, neigh), max(i, neigh)))
+        pairs_add += [(min(i, m), max(i, m)) for m in self.tensor_neighbors[i] if m != j]
+        pairs_add = set(pairs_add)
+
+        self.tensor_neighbors[i] = self.tensor_neighbors[i] | self.tensor_neighbors[j]
+        self.tensor_neighbors[i].discard(i)
+        self.tensor_neighbors[i].discard(j)
+
+        for tensor_id in self.tensor_neighbors[j]:
+            if tensor_id != i:
+                self.tensor_neighbors[tensor_id].discard(j)
+                self.tensor_neighbors[tensor_id].add(i)
+
+        for pair_update in pairs_add:
+            self.pair_info[pair_update] = self._update_pair_info(pair_update)
+        
+        return parent.tc, parent.sc, parent.mc
+
+
+    def greedy_order(self, seed):
+        """
+        Return a greedy order according to specific greedy strategy
+        """
+        tcs, scs, mcs, order = [], [np.log2(np.prod([self.tn.bond_dims[bond] for bond in self.tensor_bonds[i]])) for i in range(len(self.tensor_bonds))], [], []
+        rng = np.random.RandomState(seed)
+        uncontract = True
+        while uncontract:
+            if len(self.pair_info) > 0:
+                pair = self._pair_select(rng)
+                tc, sc, mc = self.contract(pair)
+                order.append(pair)
+                tcs.append(tc)
+                scs.append(sc)
+                mcs.append(mc)
+            else:
+                involved_nodes = set()
+                for pair in order:
+                    involved_nodes.add(pair[1])
+                source_node = order[-1][0]
+                uninvolved_nodes = set(list(range(len(self.tensor_bonds)))) - involved_nodes
+                for node in uninvolved_nodes:
+                    if node == source_node:
+                        continue
+                    pair = (source_node, node)
+                    tc, sc, mc = self.contract(pair)
+                    order.append(pair)
+                    tcs.append(tc)
+                    scs.append(sc)
+                    mcs.append(mc)
+                uncontract = False
+
+        tc = log10sumexp2(tcs)
+        sc = max(scs)
+        mc = log10sumexp2(mcs)
+        return order, tc, sc, mc
+
+    def __call__(self, strategy='min_dim', seed=0, tree_leaves=None):
+        """
+        Call the class
+        """
+        self.tensor_neighbors = []
+        if tree_leaves is None:
+            self.tensor_bonds = self.tn.tensor_bonds
+            bond_tensors = self.tn.bond_tensors
+        else:
+            self.tensor_bonds = [leaf.contain_bonds for leaf in tree_leaves]
+            all_bonds = list(set().union(*self.tensor_bonds))
+            bond_tensors = {bond: set() for bond in all_bonds} # determine tensors corresponding to each bond
+            for i in range(len(self.tensor_bonds)):
+                for j in self.tensor_bonds[i]:
+                    bond_tensors[j].add(i)
+        for i in range(len(self.tensor_bonds)):
+            self.tensor_neighbors.append(set())
+            for bond in self.tensor_bonds[i]:
+                self.tensor_neighbors[i] = self.tensor_neighbors[i] | bond_tensors[bond]
+            self.tensor_neighbors[i].discard(i)
+        self.potential_contraction_pair = [(i, j) for i in range(len(self.tensor_bonds)) for j in self.tensor_neighbors[i] if i < j] 
+        self.strategy = strategy
+        self.current_branch = {i: tree_leaves[i] for i in range(len(self.tensor_bonds))}
+        self.tree = {tree_leaves[i].contain_tensors : self.current_branch[i] for i in range(len(self.tensor_bonds))}
+        self._construct_pair_info()
+        order, tc, sc, mc = self.greedy_order(seed)
+        return order, self.tree, tc, sc, mc
+    
+
 def simulate_annealing(tree, sc_target=-1, trials=10, iters=50, betas=np.linspace(0.1, 10, 100), slicing_repeat=4, start_seed=0):
     init_result = tree.tree_complexity()
     t0 = time.time()
@@ -566,12 +728,12 @@ def simulate_annealing(tree, sc_target=-1, trials=10, iters=50, betas=np.linspac
     p.close()
     t1 = time.time()
     results_slicing = [(result[0][1] + len(result[1].tn.slicing_bonds) * log10(2), result[1]) for result in results]
-    print(results_slicing)
+    # print([r[0] for r in results_slicing])
     best_result, best_tree = sorted(results_slicing, key=lambda info:info[0])[0]
     # print(init_result)
     # print(t1 - t0)
-    print(best_result)
-    print(len(best_tree.tn.slicing_bonds))
+    # print(best_result)
+    # print(len(best_tree.tn.slicing_bonds))
 
     return best_tree.tree_to_order(), best_tree.tn.slicing_bonds
 
@@ -584,7 +746,7 @@ def sa_trial(tree, sc_target, init_result, iters, betas, seed, slicing_repeat=4)
     for beta in betas:
         for iter in range(iters):
             # t0 = time.time()
-            tree_optimize(sub_root, tree, 3, beta, init_sc, rng, sc_target=sc_target)
+            tree_update(sub_root, tree, 3, beta, init_sc, rng, sc_target=sc_target)
             tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
             result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
             if result[0] < best_result[0][0]:
@@ -630,7 +792,7 @@ def sa_trial(tree, sc_target, init_result, iters, betas, seed, slicing_repeat=4)
             for iter in range(iters):
                 sub_root = tree.tree[tree.all_tensors]
                 # t0 = time.time()
-                tree_optimize(sub_root, tree, 3, beta, sc_target, rng, check_detail=False, sc_target=sc_target)
+                tree_update(sub_root, tree, 3, beta, sc_target, rng, check_detail=False, sc_target=sc_target)
                 tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
                 result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
                 if result[0] < best_result[0][0]:
@@ -640,131 +802,8 @@ def sa_trial(tree, sc_target, init_result, iters, betas, seed, slicing_repeat=4)
         slicing_loop += 1
     return best_result
 
-def tree_sa_slicing(tree, sc_target=-1, slicing_intervals=100, trials=10, iters=100, betas=np.linspace(0.1, 10, 100), seed=0):
-    init_tc, init_sc, init_mc = tree.tree_complexity()
-    init_score = score_fn(init_tc, init_sc, init_mc, sc_target)
 
-    # args = [(tree.copy(), init_sc, iters, betas, i) for i in range(trials)]
-    # p = mp.Pool(trials)
-    # scores = p.starmap(single_trial, args)
-    # p.close()
-    trees, scores = [tree.copy() for i in range(trials)], [0 for i in range(trials)]
-    for i in range(trials):
-        best_result = [(init_score, init_tc, init_sc, init_mc), trees[i].copy()]
-        sub_root = trees[i].tree[trees[i].all_tensors] # trees[i].tree[-1]
-        rng = np.random.RandomState(seed)
-        for beta in betas:
-            for iter in range(iters):
-                t0 = time.time()
-                tree_optimize(sub_root, trees[i], 3, beta, init_sc, rng, sc_target=sc_target)
-                tc_tmp, sc_tmp, mc_tmp = trees[i].tree_complexity()
-                result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
-                if result[0] < best_result[0][0]:
-                    best_result = [result, trees[i].copy()]
-                t1 = time.time()
-                print(seed, beta, iter, init_sc, result, best_result[0][0], t1 - t0)
-        
-        result = best_result[1].tree_complexity()
-        print('after optimization, results are', result)
-        print(best_result[1].tree_to_order())
-        optimized_sc = result[1]
-        slicing_loop = 0
-        # for outer_loop in range(2 * int(init_sc - sc_target)):
-        while slicing_loop < 4 * abs(optimized_sc - sc_target) or best_result[0][2] > sc_target:
-            trees[i] = best_result[1]
-            t0 = time.time()
-            current_tc, current_sc, current_mc = trees[i].tree_complexity()
-            current_score = score_fn(current_tc, current_sc, current_mc, sc_target)
-            print('slicing init', current_score, current_tc, current_sc, current_mc)
-            if current_sc > sc_target:# or rng.rand() > 0.5:
-                scores_slicing = []
-                slicing_bonds_pool = trees[i].select_slicing_bonds()
-                for bond in slicing_bonds_pool:# trees[i].tn.bond_dims.keys():
-                    tc_slicing, sc_slicing, mc_slicing = trees[i].slicing_tree_complexity_new(bond)
-                    scores_slicing.append((bond, score_fn(tc_slicing, sc_slicing, mc_slicing, sc_target), tc_slicing, sc_slicing, mc_slicing))
-                slicing_bond = sorted(scores_slicing, key=lambda info:info[1])[0][0]
-                print(slicing_bond, scores_slicing)
-                trees[i].slicing(slicing_bond)
-            else:
-                bond_add = rng.choice(list(trees[i].tn.slicing_bonds.keys()))
-                # scores_adding = []
-                # for bond in trees[i].tn.slicing_bonds.keys():
-                #     tc_add_bond, sc_add_bond, mc_add_bond = trees[i].add_bond_complexity(bond)
-                #     scores_adding.append((bond, score_fn(tc_add_bond, sc_add_bond, mc_add_bond, sc_target), tc_add_bond, sc_add_bond, mc_add_bond))
-                # idx = rng.choice(max(len(scores_adding) // 4, 2))
-                # bond_add = sorted(scores_adding, key=lambda info:info[1])[idx][0]
-                # print(bond_add, scores_adding)
-                trees[i].add_bond(bond_add)
-            tc_tmp, sc_tmp, mc_tmp = trees[i].tree_complexity()
-            result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
-            # result = trees[i].tree_complexity()
-            best_result = (result, trees[i].copy())
-            tt = time.time() - t0
-            if current_sc > sc_target:
-                print(f'slicing time: {tt} slicing bond {slicing_bond} after slicing {result}')
-            else:
-                print(f'add bond time: {tt} add bond {bond_add} after adding {result}' )
-            for beta in betas[-10:]:# np.linspace(12.0, 20.0, 9):
-                for iter in range(iters):
-                    sub_root = trees[i].tree[trees[i].all_tensors] # trees[i].tree[-1]
-                    t0 = time.time()
-                    tree_optimize(sub_root, trees[i], 3, beta, sc_target, rng, check_detail=False, sc_target=sc_target)
-                    tc_tmp, sc_tmp, mc_tmp = trees[i].tree_complexity()
-                    result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
-                    # result = trees[i].tree_complexity()
-                    if result[0] < best_result[0][0]:
-                        best_result = (result, trees[i].copy())
-                    t1 = time.time()
-                    print(seed, slicing_loop, beta, iter, sc_target, result, best_result[0][0], t1-t0, len(trees[i].tn.slicing_bonds), list(trees[i].tn.slicing_bonds.keys()))
-            slicing_loop += 1
-        trees[i] = best_result[1]
-        scores[i] = trees[i].tree_complexity()
-    print(init_score, init_tc, init_sc)
-    final_tc, final_sc, final_mc = trees[i].tree_complexity()
-    final_score = score_fn(final_tc, final_sc, final_mc, sc_target)
-    print(final_score, final_tc, final_sc, final_mc, 10 ** (final_tc - final_mc))
-    print(f'results: sliced tc {final_tc} sliced sc {final_sc} sliced bonds number {len(trees[i].tn.slicing_bonds)} overall tc {final_tc + log10(2**len(trees[i].tn.slicing_bonds))}')
-
-    return trees[i].tree_to_order(), trees[i].tn.slicing_bonds
-
-
-def tree_sa(tree, trials=10, iters=100, betas=np.linspace(0.1, 10, 100)):
-    init_score, init_tc, init_sc = tree.tree_complexity()
-    # init_sc = 100
-    # args = [(tree.copy(), init_sc, iters, betas, i) for i in range(trials)]
-    # p = mp.Pool(trials)
-    # scores = p.starmap(single_trial, args)
-    # p.close()
-    trees, scores = [tree.copy() for i in range(trials)], [0 for i in range(trials)]
-    for i in range(trials):
-        sub_root = trees[i].tree[-1]
-        rng = np.random.RandomState(i)
-        for beta in betas:
-            for iter in range(iters):
-                # if beta == betas[-1] and iter == iters - 1:
-                #     tree_optimize(sub_root, trees[i], 3, beta, init_sc, rng, True)
-                # else:
-                t0 = time.time()
-                tree_optimize(sub_root, trees[i], 3, beta, init_sc, rng)
-                t1 = time.time()
-                print(i, beta, iter, init_sc, trees[i].tree_complexity(), t1-t0)
-        scores[i] = trees[i].tree_complexity()
-    print(init_score, init_tc, init_sc)
-    print(scores)
-
-    return trees[i].tree_to_order()
-
-def single_trial(tree, init_sc, iters, betas, seed):
-    # assert len(args) == 5
-    # tree, init_sc, iters, betas, seed = args
-    sub_root = tree.tree[-1]
-    rng = np.random.RandomState(seed)
-    for beta in betas:
-        for _ in range(iters):
-            tree_optimize(sub_root, tree, 3, beta, init_sc, rng)
-    return tree.tree_complexity()
-
-def tree_optimize(vertex, tree, size, beta, initial_sc, rng, check_detail=False, sc_target=30.0):
+def tree_update(vertex, tree, size, beta, initial_sc, rng, check_detail=False, sc_target=30.0):
     """
     Local update of the contraction tree in a recursive way.
     For each step, get the size 3 subtree of current contraction vertex and find out the possible
@@ -797,7 +836,7 @@ def tree_optimize(vertex, tree, size, beta, initial_sc, rng, check_detail=False,
                 if sc_new <= initial_sc:
                     score_new = tc_new
                 else:
-                    score_new = score_fn(tc_new, sc_new, mc_new)
+                    score_new = score_fn(tc_new, sc_new, mc_new, sc_target)
                 results.append((score_new, order_new, tc_new, sc_new))
             score_new, order_new, tc_new, sc_new = sorted(results, key=lambda r:r[0])[0]
             print(order_old, tc_tree, sc_tree)
@@ -830,10 +869,35 @@ def tree_optimize(vertex, tree, size, beta, initial_sc, rng, check_detail=False,
             #     print('-'*20)
 
         for next_vertex in [vertex.left, vertex.right]:
-            tree_optimize(next_vertex, tree, size, beta, initial_sc, rng, check_detail, sc_target)
+            tree_update(next_vertex, tree, size, beta, initial_sc, rng, check_detail, sc_target)
 
 
-def random_tree_optimize(tree:ContractionTree, iters, size, beta, rng:np.random.mtrand.RandomState, sc_target=30):
+def find_order(tensor_bonds, bond_dims, seed=0, final_qubits=[], max_bitstrings=1, **vargs):
+    """
+    Function wrapper for finding the contraction order of a given tensor network
+    """
+    from .greedy import GreedyOrderFinder
+    tensor_network = AbstractTensorNetwork(
+        deepcopy(tensor_bonds), 
+        deepcopy(bond_dims),
+        final_qubits,
+        max_bitstrings)
+    greedy_order = GreedyOrderFinder(tensor_network)
+    order, tc, sc = greedy_order('min_dim', seed)
+    ctree = ContractionTree(deepcopy(tensor_network), order, seed)
+
+    order_slicing, slicing_bonds = simulate_annealing(ctree, **vargs)
+
+    for bond in slicing_bonds:
+        tensor_network.slicing(bond)
+
+    ctree_new = ContractionTree(tensor_network, order_slicing, seed)
+
+    return order_slicing, slicing_bonds, ctree_new
+
+
+# functions below are on developing
+def random_tree_update(tree:ContractionTree, iters, size, beta, rng:np.random.mtrand.RandomState, sc_target=30):
     for _ in range(iters):
         vertex = tree.tree[rng.choice(list(tree.tree.keys()))]
         local_tree_leaves, local_tree = tree.spanning_tree(vertex, size)
@@ -857,7 +921,7 @@ def random_tree_sa(tree:ContractionTree, sc_target=-1, iters=100, betas=np.linsp
     rng = np.random.RandomState(seed)
     for beta in betas:
         t0 = time.time()
-        random_tree_optimize(tree, iters, 3, beta, rng, sc_target)
+        random_tree_update(tree, iters, 3, beta, rng, sc_target)
         tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
         result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
         if result[0] < best_result[0][0]:
@@ -903,7 +967,7 @@ def random_tree_sa(tree:ContractionTree, sc_target=-1, iters=100, betas=np.linsp
             print(f'add bond time: {tt} add bond {bond_add} after adding {result}' )
         for beta in betas[23:]:# np.linspace(12.0, 20.0, 9):
             t0 = time.time()
-            random_tree_optimize(tree, iters, 3, beta, rng, sc_target)
+            random_tree_update(tree, iters, 3, beta, rng, sc_target)
             tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
             result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
             if result[0] < best_result[0][0]:
@@ -920,21 +984,135 @@ def random_tree_sa(tree:ContractionTree, sc_target=-1, iters=100, betas=np.linsp
     return tree.tree_to_order(), tree.tn.slicing_bonds
 
 
-def subtree_optimize(vertex:ContractionVertex, tree:ContractionTree, size, beta, initial_sc, rng, sc_target):
+def tree_optimize(tree, sc_target=-1, trials=10, iters=50, subtree_size=3, slicing_repeat=4, start_seed=0):
+    init_result = tree.tree_complexity()
+    t0 = time.time()
+    args = [(tree.copy(), sc_target, init_result, iters, subtree_size, start_seed + i, slicing_repeat) for i in range(trials)]
+    p = mp.Pool(trials)
+    results = p.starmap(tree_optimize_subroutine, args)
+    p.close()
+    t1 = time.time()
+    results_slicing = [(result[0][1] + len(result[1].tn.slicing_bonds) * log10(2), result[1]) for result in results]
+    print(results_slicing)
+    best_result, best_tree = sorted(results_slicing, key=lambda info:info[0])[0]
+    # print(init_result)
+    # print(t1 - t0)
+    print(best_result)
+    print(len(best_tree.tn.slicing_bonds))
+
+    return best_tree.tree_to_order(), best_tree.tn.slicing_bonds
+
+def tree_optimize_subroutine(tree, sc_target, init_result, iters, subtree_size,seed, slicing_repeat=4):
+    init_tc, init_sc, init_mc = init_result
+    init_score = score_fn(init_tc, init_sc, init_mc)
+    best_result = [(init_score, init_tc, init_sc, init_mc), tree.copy()]
+    sub_root = tree.tree[tree.all_tensors]
+    rng = np.random.RandomState(seed)
+    for iter in range(iters):
+        t0 = time.time()
+        vertex = tree.tree[rng.choice(list(tree.tree.keys())[-3:])]
+        subtree_update(vertex, tree, subtree_size, rng, sc_target=sc_target)
+        tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
+        result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
+        if result[0] < best_result[0][0]:
+            best_result = [result, tree.copy()]
+        t1 = time.time()
+        print(iter, init_result[2], result, best_result[0][0], t1 - t0)
+    
+    result = best_result[1].tree_complexity()
+    optimized_sc = result[1]
+    print('after optimization, results are', result)
+    slicing_loop = 0
+    # while slicing_loop < slicing_repeat * abs(optimized_sc - sc_target) or best_result[0][2] > sc_target:
+    #     tree = best_result[1]
+    #     t0 = time.time()
+    #     current_tc, current_sc, current_mc = tree.tree_complexity()
+    #     print('slicing init', current_tc, current_sc)
+    #     if current_sc > sc_target:# or rng.rand() > 0.5:
+    #         scores_slicing = []
+    #         for bond in tree.select_slicing_bonds():
+    #             tc_slicing, sc_slicing, mc_slicing = tree.slicing_tree_complexity_new(bond)
+    #             scores_slicing.append((bond, score_fn(tc_slicing, sc_slicing, mc_slicing, sc_target), tc_slicing, sc_slicing, mc_slicing))
+    #         slicing_bond = sorted(scores_slicing, key=lambda info:info[1])[0][0]
+    #         print(slicing_bond, scores_slicing)
+    #         tree.slicing(slicing_bond)
+    #     elif len(tree.tn.slicing_bonds) > 0:
+    #         bond_add = rng.choice(list(tree.tn.slicing_bonds.keys()))
+    #         # scores_adding = []
+    #         # for bond in tree.tn.slicing_bonds.keys():
+    #         #     scores_adding.append((bond, tree.add_bond_complexity(bond)[0]))
+    #         # idx = rng.choice(max(len(scores_adding) // 4, 2))
+    #         # bond_add = sorted(scores_adding, key=lambda info:info[1])[idx][0]
+    #         # print(bond_add, scores_adding)
+    #         tree.add_bond(bond_add)
+    #     tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
+    #     result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
+    #     best_result = (result, tree.copy())
+    #     tt = time.time() - t0
+    #     if current_sc > sc_target:
+    #         print(f'slicing time: {tt} slicing bond {slicing_bond} after slicing {result}')
+    #     else:
+    #         print(f'add bond time: {tt} add bond {bond_add} after adding {result}' )
+    #     for iter in range(iters):
+    #         vertex = tree.tree[rng.choice(list(tree.tree.keys()))]
+    #         t0 = time.time()
+    #         subtree_update(vertex, tree, subtree_size, rng, sc_target=sc_target)
+    #         tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
+    #         result = (score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target), tc_tmp, sc_tmp, mc_tmp)
+    #         if result[0] < best_result[0][0]:
+    #             best_result = (result, tree.copy())
+    #         t1 = time.time()
+    #         print(slicing_loop, iter, sc_target, result, best_result[0][0], t1-t0, len(tree.tn.slicing_bonds), list(tree.tn.slicing_bonds.keys()))
+    #     slicing_loop += 1
+    return best_result
+
+def subtree_update(vertex:ContractionVertex, tree:ContractionTree, size, rng, sc_target):
     """
     Single step of local search in contraction tree
     """
     local_tree_leaves, local_tree = tree.spanning_tree(vertex, size)
     if len(local_tree_leaves) > 2:
         tc_tree, sc_tree, mc_tree = tree.tree_complexity(local_tree, vertex)
-        reference_score = score_fn(tc_tree, sc_tree, mc_tree, sc_target)
-        for leaf in local_tree_leaves:
-            print(leaf.contain_tensors)
-            print(leaf.contain_bonds)
-        sub_tensor_bonds = [leaf.contain_bonds for leaf in local_tree_leaves]
-        sub_tensor_lists = [leaf.contain_tensors for leaf in local_tree_leaves]
-        sub_tn = tree.tn.sub_tensor_network(sub_tensor_lists, sub_tensor_bonds)
-        greedy_finder = GreedyOrderFinder(sub_tn)
-        order_new, tc_new, sc_new, mc_new = greedy_finder(seed=rng.randint(len(local_tree_leaves)))
-        
+        score_reference = score_fn(tc_tree, sc_tree, mc_tree, sc_target)
+        # for leaf in local_tree_leaves:
+        #     print(leaf.contain_tensors)
+        #     print(leaf.contain_bonds)
+        # print(local_tree)
+        # sub_tensor_bonds = [leaf.contain_bonds for leaf in local_tree_leaves]
+        # sub_tensor_lists = [leaf.contain_tensors for leaf in local_tree_leaves]
+        # sub_tn = tree.tn.sub_tensor_network(sub_tensor_lists, sub_tensor_bonds)
+        # print(sub_tn.tensor_bonds, sub_tn.num_fq)
+        greedy_finder = GreedyOrderFinderNew(tree.tn)
+        result_new = []
+        for i in range(20):
+            order_new, tree_new, tc_new, sc_new, mc_new = greedy_finder(
+                'max_reduce', 
+                rng.randint(len(local_tree_leaves)), 
+                local_tree_leaves
+            )
+            score_new = score_fn(tc_new, sc_new, mc_new, sc_target)
+            result_new.append((order_new, score_new))
+        print([result[1] for result in result_new])
+        order_new, score_new = sorted(result_new, key=lambda r:r[1])[0]
+        # print(order_new, tree_new)
+        print('scores', score_reference, score_new)
+        if np.exp(0.1 * (score_new - score_reference)) < rng.rand():
+            print('updated!', vertex.contain_tensors)
+            # print('-'*20)
+            # print('leaves:')
+            # for leaf in local_tree_leaves:
+            #     print(leaf.contain_tensors)
+            #     print(leaf.contain_bonds)
+            # print('tree:')
+            # for v in local_tree:
+            #     print(v.contain_tensors, v.contain_bonds)
+            print(f'before all tree complexity {tree.tree_complexity()}')
+            tree.apply_order(order_new, local_tree_leaves, local_tree, vertex)
+            # print(order_new)
+            print(f'before tc {tc_tree} sc {sc_tree} mc {mc_tree} score {score_reference}') 
+            print(f'after tc {tc_new} sc {sc_new} mc {mc_new} score {score_new}')
+            print(f'after all tree complexity {tree.tree_complexity()}')
+
+        # for next_vertex in local_tree_leaves:
+        #     subtree_update(next_vertex, tree, size, rng, sc_target)
         

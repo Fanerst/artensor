@@ -5,3 +5,6 @@ __pycache__
 .pytest_cache/
 
 develop_scripts/
+experiment_tests/
+*.tar.*
+benchmark/

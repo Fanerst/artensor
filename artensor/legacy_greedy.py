@@ -1,7 +1,10 @@
-from .utils import final_qubits_num, log2_accum_dims, log10sumexp2
 from math import log2, ceil
 import numpy as np
-
+from .utils import(
+    log2_accum_dims,
+    final_qubits_num,
+    log10sumexp2
+)
 
 class GreedyOrderFinder:
     def __init__(self, tensor_network) -> None:

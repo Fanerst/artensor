@@ -24,22 +24,29 @@ def contraction_scheme(ctree:ContractionTree):
     """
     Compile a contraction scheme according to the contraction tree in a depth-first search way
     """
+    ctree.mark_rep_tensor()
     stack = [ctree.tree[ctree.all_tensors]]
     scheme = []
     while len(stack):
         vertex = stack.pop()
         if vertex.left and vertex.right:
-            rep_tensors = [min(vertex.left.contain_tensors), min(vertex.right.contain_tensors)]
-            order = (min(rep_tensors), max(rep_tensors))
             if vertex.left.is_leaf():
-                ix_left = ctree.tn.tensor_bonds[rep_tensors[0]]
+                ix_left = ctree.tn.tensor_bonds[vertex.left.rep_tensor]
             else:
                 ix_left = list(vertex.left.contain_bonds)
             if vertex.right.is_leaf():
-                ix_right = ctree.tn.tensor_bonds[rep_tensors[1]]
+                ix_right = ctree.tn.tensor_bonds[vertex.right.rep_tensor]
             else:
                 ix_right = list(vertex.right.contain_bonds)
-            ixs, iy = (ix_left, ix_right), list(vertex.contain_bonds)
+            if vertex.rep_tensor == vertex.left.rep_tensor:
+                order = (vertex.left.rep_tensor, vertex.right.rep_tensor)
+                ixs = (ix_left, ix_right)
+            elif vertex.rep_tensor == vertex.right.rep_tensor:
+                order = (vertex.right.rep_tensor, vertex.left.rep_tensor)
+                ixs = (ix_right, ix_left)
+            else:
+                raise ValueError('Incorrect rep tensor mark process.')
+            iy = list(vertex.contain_bonds)
             if vertex == ctree.tree[ctree.all_tensors]:
                 output_bonds = iy
             einsum_eq = einsum_eq_convert(ixs, iy)
@@ -59,7 +66,12 @@ def tensor_contraction(tensors, scheme):
     for s in scheme:
         i, j = s[0]
         einsum_eq = s[1]
-        tensors[i] = torch.einsum(einsum_eq, tensors[i], tensors[j])
+        try:
+            tensors[i] = torch.einsum(einsum_eq, tensors[i], tensors[j])
+        except:
+            print(s, len(tensors[i].shape), len(tensors[j].shape))
+            print_exc()
+            sys.exit(1)
     
     return tensors[i]
 
@@ -273,7 +285,7 @@ def contraction_scheme_sparse(ctree:ContractionTree, bitstrings=None, sc_target=
                 # print(len(batch_seq[0][0]), torch.max(batch_seq[0][0]), len(tensor_info[i][1]), torch.max(batch_seq[1][0]), len(tensor_info[j][1]))
                 assert torch.max(batch_seq[0][0]) < len(tensor_info[i][1])
                 assert torch.max(batch_seq[1][0]) < len(tensor_info[j][1])
-                num_seperated_seq = 2 ** ceil(max(0, np.log2(len(tmp_bitstrings_rep)) + max(len(bond_i), len(bond_j)) - (sc_target - 1)))
+                num_seperated_seq = 2 ** ceil(max(0, np.log2(len(tmp_bitstrings_rep)) + max(len(bond_i), len(bond_j)) - (sc_target - 2)))
                 # print((i, j), len(tmp_bitstrings_rep), len(bond_i), len(bond_j), sc_target, num_seperated_seq)
                 if num_seperated_seq > 1:
                     seq_length = int(len(tmp_bitstrings_rep) / num_seperated_seq)

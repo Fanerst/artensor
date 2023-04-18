@@ -99,13 +99,15 @@ def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, righ
     sc = log2_accum_dims(tn.bond_dims, result_bonds)
     tc += multiconfig_factor # + batch_contraction_penalty
     sc += multiconfig_factor
-    if (max(left.multiconfig_factor, right.multiconfig_factor) < tn.log2_max_bitstring and multiconfig_factor == tn.log2_max_bitstring) or \
-        max(left.multiconfig_factor, right.multiconfig_factor) >= tn.log2_max_bitstring:
+    # if (max(left.multiconfig_factor, right.multiconfig_factor) < tn.log2_max_bitstring and multiconfig_factor == tn.log2_max_bitstring) or \
+    #     max(left.multiconfig_factor, right.multiconfig_factor) >= tn.log2_max_bitstring:
+    if combined_multiconfig_factor > tn.log2_max_bitstring:
         mc = log2sumexp2([
             left.sc-left.multiconfig_factor+multiconfig_factor,
             right.sc-right.multiconfig_factor+multiconfig_factor,
             sc
-            ])
+        ])
+        # tc += 0.3 * (len(left.contain_bonds) - len(right.contain_bonds))
     else:
         mc = log2sumexp2([left.sc, right.sc, sc])
     return tc, sc, multiconfig_factor, result_bonds, mc, contract_bonds, all_bonds

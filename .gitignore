@@ -8,3 +8,7 @@ develop_scripts/
 experiment_tests/
 *.tar.*
 benchmark/
+artensor_experimenting/
+artensor_legacy/
+asc/
+rbm/

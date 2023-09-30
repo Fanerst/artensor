@@ -171,7 +171,10 @@ def tree_update(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha
             tree_update(next_vertex, tree, size, beta, initial_sc, rng, sc_target, alpha)
 
 
-def find_order(tensor_bonds, bond_dims, final_qubits=[], seed=0, max_bitstrings=1, **vargs):
+def find_order(
+        tensor_bonds, bond_dims, final_qubits=[], seed=0, max_bitstrings=1, 
+        **simulated_annnealing_args
+    ):
     """
     Function wrapper for finding the contraction order of a given tensor network
     """
@@ -184,7 +187,9 @@ def find_order(tensor_bonds, bond_dims, final_qubits=[], seed=0, max_bitstrings=
     # order, tc, sc = greedy_order('min_dim', seed)
     # ctree = ContractionTree(deepcopy(tensor_network), order, seed)
     sys.setrecursionlimit(16385)
-    order_slicing, slicing_bonds = simulate_annealing(deepcopy(tensor_network), **vargs)
+    order_slicing, slicing_bonds = simulate_annealing(
+        deepcopy(tensor_network), **simulated_annnealing_args
+    )
 
     for bond in slicing_bonds:
         tensor_network.slicing(bond)

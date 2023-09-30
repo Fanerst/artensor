@@ -4,3 +4,4 @@ from .tensor_network import AbstractTensorNetwork, NumericalTensorNetwork
 from .contraction import *
 from .utils import log10sumexp2
 from .circuit import TensorNetworkCircuit
+from .simulation import *

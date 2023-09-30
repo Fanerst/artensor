@@ -78,14 +78,14 @@ class TensorNetworkSimulation:
 
     def update_scheme(self, sc_target=30, bitstrings=[]):
         if self.pattern == 'normal':
-            self.scheme, self.output_bonds = contraction_scheme(self.ctree)
+            self.scheme, self.output_bonds = contraction_scheme(deepcopy(self.ctree))
             self.tensor_contraction_func = tensor_contraction
         else:
             self.scheme, self.output_bonds, self.bitstrings_sorted = contraction_scheme_sparse(
-                self.ctree, bitstrings, sc_target=sc_target
+                deepcopy(self.ctree), bitstrings, sc_target=sc_target
             )
             self.tensor_contraction_func = tensor_contraction_sparse
-            assert len(self.bitstrings_sorted) == self.max_bitstrings
+            assert len(self.bitstrings_sorted) <= self.max_bitstrings
     
     def contraction(self, tensors=None, dtype=torch.complex64, device='cpu'):
         if tensors is None:
@@ -98,7 +98,7 @@ class TensorNetworkSimulation:
                 tensors[i].to(dtype).to(device) for i in range(len(tensors))
             ]
 
-        collect_tensor_shape = [self.max_bitstrings] + [2] * len(self.output_bonds) \
+        collect_tensor_shape = [len(self.bitstrings_sorted)] + [2] * len(self.output_bonds) \
         if self.pattern == 'sparse' else [2] * len(self.output_bonds)
         collect_tensor = torch.zeros(
             collect_tensor_shape, dtype=dtype, device=device

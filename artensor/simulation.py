@@ -50,7 +50,7 @@ class TensorNetworkSimulation:
             alpha=32.0):
         bond_tensors = get_bond_tensors(self.tensor_bonds)
         betas = np.linspace(3.0, 21.0, 61)
-        order_slicing, slicing_bonds, ctree = find_order(
+        order_slicing, slicing_bonds, self.ctree = find_order(
             self.tensor_bonds, self.bond_dims, self.final_qubits, 0, 
             self.max_bitstrings, sc_target=sc_target, trials=trials, iters=iters, 
             betas=betas, start_seed=start_seed, slicing_repeat=slicing_repeat, 
@@ -64,15 +64,7 @@ class TensorNetworkSimulation:
             inds = [self.tensor_bonds[tid].index(bond) for tid in tensor_ids]
             self.slicing_indices[bond] = [(tid, ind) for tid, ind in zip(tensor_ids, inds)]
 
-        if self.pattern == 'normal':
-            self.scheme, self.output_bonds = contraction_scheme(ctree)
-            self.tensor_contraction_func = tensor_contraction
-        else:
-            self.scheme, self.output_bonds, self.bitstrings_sorted = contraction_scheme_sparse(
-                ctree, self.bitstrings, sc_target=sc_target
-            )
-            self.tensor_contraction_func = tensor_contraction_sparse
-            assert len(self.bitstrings_sorted) == self.max_bitstrings
+        self.update_scheme(sc_target, self.bitstrings)
         if len(self.output_bonds) > 0:
             bond_inds = []
             for x in range(len(self.output_bonds)):
@@ -83,6 +75,17 @@ class TensorNetworkSimulation:
             self.permute_dims = tuple(np.argsort(bond_inds))
             if self.pattern == 'sparse':
                 self.permute_dims = [0] + [dim+1 for dim in self.permute_dims]
+
+    def update_scheme(self, sc_target=30, bitstrings=[]):
+        if self.pattern == 'normal':
+            self.scheme, self.output_bonds = contraction_scheme(self.ctree)
+            self.tensor_contraction_func = tensor_contraction
+        else:
+            self.scheme, self.output_bonds, self.bitstrings_sorted = contraction_scheme_sparse(
+                self.ctree, bitstrings, sc_target=sc_target
+            )
+            self.tensor_contraction_func = tensor_contraction_sparse
+            assert len(self.bitstrings_sorted) == self.max_bitstrings
     
     def contraction(self, tensors=None, dtype=torch.complex64, device='cpu'):
         if tensors is None:

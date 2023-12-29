@@ -4,7 +4,7 @@ import numpy as np
 import sys
 from copy import deepcopy
 from .greedy import GreedyOrderFinder
-from .contraction_tree import ContractionTree
+from .contraction_tree import ContractionTree, ContractionVertex, get_tc_sc_contraction
 from .tensor_network import AbstractTensorNetwork
 
 
@@ -21,14 +21,6 @@ def simulate_annealing(
         slicing_repeat=4, start_seed=0, alpha=32.0
     ):
     greedy_order = GreedyOrderFinder(tensor_network)
-    # order, tc, sc = greedy_order('min_dim', seed)
-    # ctree = ContractionTree(deepcopy(tensor_network), order, seed)
-    # init_result = tree.tree_complexity()
-    # args = [
-    #     (
-    #         tree.copy(), sc_target, init_result, iters, betas, start_seed + i, 
-    #         slicing_repeat, alpha
-    #     ) for i in range(trials)]
     init_tree = [
         ContractionTree(
             deepcopy(tensor_network), 
@@ -123,7 +115,7 @@ def sa_trial(
     return best_result
 
 
-def determine_old_order(vertex, local_tree_leaves):
+def old_tree_stats(vertex, local_tree_leaves):
     """
     Given subroot and subtree, determine the order of it, only useful when the subtree size is 3
     """
@@ -132,16 +124,24 @@ def determine_old_order(vertex, local_tree_leaves):
     elif vertex.right not in local_tree_leaves:
         branch = vertex.right
     else:
-        print(vertex.left, vertex.right, local_tree_leaves)
+        print(
+            vertex.left.contain_tensors, 
+            vertex.right.contain_tensors, 
+            [v.contain_tensors for v in local_tree_leaves]
+        )
         raise ValueError('something wrong with the local tree')
+    sc = max([leaf.sc for leaf in local_tree_leaves] + [vertex.sc, branch.sc])
+    tc = log10(2**branch.tc + 2**vertex.tc)
+    mc = log10(2**branch.mc + 2**vertex.mc)
+
     first_contract = sorted((local_tree_leaves.index(branch.left), local_tree_leaves.index(branch.right)))
     if first_contract == [0, 2]:
-        return [(0,2), (0,1)]
+        return [(0,2), (0,1)], tc, sc, mc
     elif first_contract == [0, 1]:
-        return [(0,1), (0,2)]
+        return [(0,1), (0,2)], tc, sc, mc
     else:
         assert first_contract == [1, 2]
-        return [(1,2), (0,1)]
+        return [(1,2), (0,1)], tc, sc, mc
 
 
 def tree_update(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha=32.0):
@@ -153,19 +153,41 @@ def tree_update(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha
     """
     local_tree_leaves, local_tree = tree.spanning_tree(vertex, size)
     if len(local_tree_leaves) > 2:
-        tc_tree, sc_tree, mc_tree = tree.tree_complexity(local_tree, vertex)
+        # tc_tree, sc_tree, mc_tree = tree.tree_complexity(local_tree, vertex)
+        order_old, tc_tree, sc_tree, mc_tree = old_tree_stats(vertex, local_tree_leaves)
         reference_score = score_fn(tc_tree, sc_tree, mc_tree, sc_target, alpha)
-        order_old = determine_old_order(vertex, local_tree_leaves)
-        order_pool = [[(0,2),(0,1)], [(0,1),(0,2)], [(1,2),(0,1)]]
-
-        order_pool.remove(order_old)
+        order_pool = [o for o in [[(0,2),(0,1)], [(0,1),(0,2)], [(1,2),(0,1)]] if o != order_old]
         order_new = order_pool[rng.choice(2)]
-        tc_new, sc_new, mc_new = tree.tree_complexity_new_order(local_tree_leaves, order_new)
+        left_new, right_new = local_tree_leaves[order_new[0][0]], local_tree_leaves[order_new[0][1]]
+        branch_new = ContractionVertex(
+            left_new.contain_tensors | right_new.contain_tensors, 
+            tree.tn, left_new, right_new
+        )
+        third_leaf = order_new[1][1] if order_new[0] != (1,2) else 0
+        tc_vertex, sc_vertex, multiconfig_factor, contain_bonds, mc_vertex, contract_bonds, all_bonds = get_tc_sc_contraction(
+            tree.tn, branch_new, local_tree_leaves[third_leaf]
+        )
+        # print(tc_vertex, sc_vertex, multiconfig_factor, contain_bonds, mc_vertex, contract_bonds, all_bonds)
+        sc_new = max([leaf.sc for leaf in local_tree_leaves] + [sc_vertex, branch_new.sc])
+        tc_new = log10(2**branch_new.tc + 2**tc_vertex)
+        mc_new = log10(2**branch_new.mc + 2**mc_vertex)
+        # tc_new, sc_new, mc_new = tree.tree_complexity_new_order(local_tree_leaves, order_new)
         score_new = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
 
 
-        if rng.rand() < np.exp(-beta * (score_new-reference_score)):
-            tree.apply_order(order_new, local_tree_leaves, local_tree, vertex)
+        if score_new < reference_score or rng.rand() < np.exp(-beta * (score_new-reference_score)):
+            for leaf in local_tree:
+                assert leaf.contain_tensors in tree.tree.keys(), print(leaf.contain_tensors, len(tree.tree.keys()))
+            # tree.apply_order(order_new, local_tree_leaves, local_tree, vertex)
+            vertex.tc, vertex.sc, vertex.multiconfig_factor, vertex.contain_bonds, vertex.mc, vertex.contract_bonds, vertex.all_bonds = \
+            tc_vertex, sc_vertex, multiconfig_factor, contain_bonds, mc_vertex, contract_bonds, all_bonds
+            if vertex.left not in local_tree_leaves:
+                tree.tree.pop(vertex.left.contain_tensors)
+            elif vertex.right not in local_tree_leaves:
+                tree.tree.pop(vertex.right.contain_tensors)
+            vertex.left = branch_new
+            vertex.right = local_tree_leaves[third_leaf]
+            tree.tree[branch_new.contain_tensors] = branch_new
 
         for next_vertex in [vertex.left, vertex.right]:
             tree_update(next_vertex, tree, size, beta, initial_sc, rng, sc_target, alpha)

@@ -110,6 +110,7 @@ class GreedyOrderFinder:
         while uncontract:
             if len(self.pair_info) > 0:
                 pair = self._pair_select(rng)
+                # print(pair)
                 tc_step, sc_step = self.contract(pair)
                 order.append(pair)
                 tcs.append(tc_step)
@@ -148,7 +149,7 @@ class GreedyOrderFinder:
             for bond in self.contain_bonds[i]:
                 self.tensor_neighbors[i] = self.tensor_neighbors[i] | self.tn.bond_tensors[bond]
             self.tensor_neighbors[i].discard(i)
-        self.potential_contraction_pair = [(min(i, j), max(i, j)) for i in range(len(self.contain_tensors)) for j in self.tensor_neighbors[i]]
+        self.potential_contraction_pair = [(min(i, j), max(i, j)) for i in range(len(self.contain_tensors)) for j in sorted(self.tensor_neighbors[i])]
         self._construct_pair_info()
         order, tc, sc = self.greedy_order(seed)
         return order, tc, sc

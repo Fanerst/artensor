@@ -91,10 +91,10 @@ class AbstractTensorNetwork:
 
     def _simplify(self, strategy='normal'):
         assert strategy in ['normal', 'sparse']
-        dangling_tensor_id = set([
+        dangling_tensor_id = sorted(set([
             i for i in self.tensor_bonds.keys() 
             if len(self.tensor_bonds[i]) == 1 and i not in self.final_qubits
-        ])
+        ]))
         while len(dangling_tensor_id) > 0:
             new_dangling_id = set([])
             for tensor_id in dangling_tensor_id:
@@ -103,13 +103,13 @@ class AbstractTensorNetwork:
                 self.contract(tid_to_contract, tensor_id)
                 if len(self.tensor_bonds[tid_to_contract]) == 1:
                     new_dangling_id.add(tid_to_contract)
-            dangling_tensor_id = new_dangling_id
+            dangling_tensor_id = sorted(new_dangling_id)
         matrix_tensor_id = set([
             i for i in self.tensor_bonds.keys() 
             if len(self.tensor_bonds[i]) == 2 and i not in self.final_qubits
         ])
         while len(matrix_tensor_id) > 0:
-            tensor_id = list(matrix_tensor_id)[0]
+            tensor_id = sorted(matrix_tensor_id)[0]
             assert len(self.tensor_bonds[tensor_id]) == 2
             tid_to_contract = self.find_contract_pair(tensor_id)
             self.contract(tid_to_contract, tensor_id)
@@ -128,7 +128,7 @@ class AbstractTensorNetwork:
             lambda x : len(x[0]) > 1 and len(x[1]) > 1,
             flipped_bond_tensors.items()
         )
-        for x, y in common_bond_tensors:
+        for x, y in sorted(common_bond_tensors):
             self.contract(*x)
 
         tensor_bonds_reorder = {}
@@ -224,43 +224,6 @@ class NumericalTensorNetwork(AbstractTensorNetwork):
             einsum_eq_convert((bonds_x, bonds_y), bonds_new), 
             self.tensors.pop(x), self.tensors.pop(y)
         )
-
-    def find_contract_pair(self, tid):
-        possible_tid = set().union(
-            *[self.bond_tensors[bond] for bond in self.tensor_bonds[tid]]
-        )
-        possible_tid.discard(tid)
-        tid_to_contract = sorted(
-            possible_tid, key=lambda x:len(self.tensor_bonds[x])
-        )[-1]
-        return tid_to_contract
-
-    # def _simplify(self):
-    #     dangling_tensor_id = set([
-    #         i for i in self.tensor_bonds.keys() if len(self.tensor_bonds[i]) == 1
-    #     ])
-    #     while len(dangling_tensor_id) > 0:
-    #         new_dangling_id = set([])
-    #         for tensor_id in dangling_tensor_id:
-    #             assert len(self.tensor_bonds[tensor_id]) == 1
-    #             tid_to_contract = self.find_contract_pair(tensor_id)
-    #             self.contract(tid_to_contract, tensor_id)
-    #             if len(self.tensor_bonds[tid_to_contract]) == 1:
-    #                 new_dangling_id.add(tid_to_contract)
-    #         dangling_tensor_id = new_dangling_id
-    #     matrix_tensor_id = set([
-    #         i for i in self.tensor_bonds.keys() 
-    #         if len(self.tensor_bonds[i]) == 2 and i not in self.final_qubits
-    #     ])
-    #     while len(matrix_tensor_id) > 0:
-    #         tensor_id = list(matrix_tensor_id)[0]
-    #         assert len(self.tensor_bonds[tensor_id]) == 2
-    #         tid_to_contract = self.find_contract_pair(tensor_id)
-    #         self.contract(tid_to_contract, tensor_id)
-    #         matrix_tensor_id = set([
-    #             i for i in self.tensor_bonds.keys() 
-    #             if len(self.tensor_bonds[i]) == 2 and i not in self.final_qubits
-    #         ])
 
     def _exclude_batch_dim(self):
         for tid in self.final_qubits:

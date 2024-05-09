@@ -41,6 +41,7 @@ class ContractionVertex:
             self.tc, self.sc, self.multiconfig_factor, self.contain_bonds, self.mc = \
                 get_tc_sc_inner(tn, contain_tensors)
             self.all_bonds = self.contain_bonds
+            self.contract_bonds = set()
 
     def is_leaf(self):
         if self.left and self.right:
@@ -209,11 +210,14 @@ class ContractionTree:
             if bond in vertex.all_bonds:
             # if bond in vertex.contain_bonds or (vertex.left and bond in vertex.left.contain_bonds) or (vertex.right and bond in vertex.right.contain_bonds):
                 # print('-'*20)
-                # print(vertex.contain_tensors, vertex.involved_bonds)
+                # print(vertex.contain_tensors, vertex.contain_bonds, vertex.tc, vertex.sc)
                 # if vertex.left and vertex.right:
                 #     print(vertex.left.contain_tensors, vertex.left.contain_bonds)
                 #     print(vertex.right.contain_tensors, vertex.right.contain_bonds)
+                # if bond in vertex.contract_bonds:
+                #     print('*'*20)
                 vertex.update_info(vertex.contain_tensors, self.tn, vertex.left, vertex.right)
+                # print(vertex.tc, vertex.sc)
                 # print(vertex.contain_tensors, vertex.contain_bonds, vertex.tc, vertex.sc)
     
     def add_bond(self, bond):

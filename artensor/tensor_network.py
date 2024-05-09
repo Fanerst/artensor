@@ -128,7 +128,7 @@ class AbstractTensorNetwork:
             lambda x : len(x[0]) > 1 and len(x[1]) > 1,
             flipped_bond_tensors.items()
         )
-        for x, y in common_bond_tensors:
+        for x, y in sorted(common_bond_tensors):
             self.contract(*x)
 
         tensor_bonds_reorder = {}

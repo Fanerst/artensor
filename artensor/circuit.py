@@ -29,7 +29,7 @@ class Tensor:
 
 class TensorNetworkCircuit:
     def __init__(
-            self, circuit_filename, init_state=None, device='cpu', dtype=torch.complex64
+            self, circuit_filename, init_state=None, final_state=None, device='cpu', dtype=torch.complex64
         ) -> None:
         self.circuit_filename = circuit_filename
         self.dev = device
@@ -40,6 +40,8 @@ class TensorNetworkCircuit:
         else:
             self.init_state = init_state
         assert len(self.init_state) == self.n
+        self.final_state = final_state
+        assert self.final_state is None or len(self.final_state) == self.n
         self._construct_circuit()
         pass
 
@@ -95,15 +97,17 @@ class TensorNetworkCircuit:
                 self.circuits_tn.append(Tensor(gate_form, inds))
                 for q in exec_qubits:
                     wire_loc[q] += 1
-        
-        # # final_qubits
-        # self.circuits_tn = [
-        #     Tensor(
-        #         torch.tensor([[1, 0], [0, 1]], dtype=self.dtype, device=self.dev)
-        #         [f'{wire_loc[i]}-{i}']
-        #     )
-        #     for i in range(self.n)
-        # ]
+        if self.final_state is not None:
+            # final_qubits
+            self.circuits_tn += [
+                Tensor(
+                    torch.tensor([1, 0], dtype=self.dtype, device=self.dev) 
+                    if self.final_state[i] == 0 else
+                    torch.tensor([0, 1], dtype=self.dtype, device=self.dev),
+                    [f'{wire_loc[i]}-{i}']
+                )
+                for i in range(self.n)
+            ]
 
     def to_abstract_tn(self):
         assert 'circuits_tn' in self.__dict__.keys()

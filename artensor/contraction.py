@@ -6,7 +6,7 @@ from traceback import print_exc
 import sys
 
 
-allow_ascii = list(range(65, 90)) + list(range(97, 122))
+allow_ascii = list(range(65, 91)) + list(range(97, 123)) + list(range(48, 58))
 letters = [chr(allow_ascii[i]) for i in range(len(allow_ascii))]
 
 
@@ -15,6 +15,7 @@ def einsum_eq_convert(ixs, iy):
     Generate a einqum eq according to ixs (bonds of contraction tensors) and iy (bonds of resulting tensors)
     """
     uniquelabels = list(set(sum(ixs, start=[]) + iy))
+    assert len(uniquelabels) <= len(letters), f'Too many bonds for einsum eq: uniquelabels={uniquelabels}.'
     labelmap = {l:letters[i] for i, l in enumerate(uniquelabels)}
     einsum_eq = ",".join(["".join([labelmap[l] for l in ix]) for ix in ixs]) + "->" + "".join([labelmap[l] for l in iy])
     return einsum_eq

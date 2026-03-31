@@ -29,10 +29,26 @@ class AbstractTensorNetwork:
         self.tensor_bonds = tensor_bonds
         self.bond_dims = bond_dims
         self.log2_bond_dims = {bond: log2(dim) for bond, dim in bond_dims.items()}
+        self._tensor_ids = tuple(tensor_bonds.keys())
+        self._bond_ids = tuple(self.bond_dims.keys())
+        self.bond_index = {bond: idx for idx, bond in enumerate(self._bond_ids)}
+        self.tensor_bitmasks = {tensor_id: 1 << tensor_id for tensor_id in self._tensor_ids}
+        self.bond_bitmasks = {bond: 1 << self.bond_index[bond] for bond in self._bond_ids}
+        self.bond_log2_dim_array = [0.0] * len(self._bond_ids)
+        for bond, value in self.log2_bond_dims.items():
+            self.bond_log2_dim_array[self.bond_index[bond]] = value
         self.bond_tensors = {bond: set() for bond in self.bond_dims.keys()} # determine tensors corresponding to each bond
         for i in tensor_bonds.keys():
             for j in tensor_bonds[i]:
                 self.bond_tensors[j].add(i)
+        self.bond_tensor_masks = {
+            bond: sum(self.tensor_bitmasks[tensor_id] for tensor_id in tensor_ids)
+            for bond, tensor_ids in self.bond_tensors.items()
+        }
+        self.tensor_bond_masks = {
+            tensor_id: self.bonds_to_mask(bonds)
+            for tensor_id, bonds in self.tensor_bonds.items()
+        }
         self.final_qubits = final_qubits
         if final_qubits:
             self.num_fq = [1 if i in final_qubits else 0 for i in tensor_bonds.keys()]
@@ -43,6 +59,29 @@ class AbstractTensorNetwork:
         self.slicing_bonds = {}
         self.slicing_bond_tensors = {}
         pass
+
+    def bonds_to_mask(self, bonds):
+        mask = 0
+        for bond in bonds:
+            mask |= self.bond_bitmasks[bond]
+        return mask
+
+    def sum_log2_dims_mask(self, mask):
+        total = 0.0
+        while mask:
+            lowest_bit = mask & -mask
+            bond_index = lowest_bit.bit_length() - 1
+            total += self.bond_log2_dim_array[bond_index]
+            mask ^= lowest_bit
+        return total
+
+    def mask_to_bonds(self, mask):
+        bonds = []
+        while mask:
+            lowest_bit = mask & -mask
+            bonds.append(self._bond_ids[lowest_bit.bit_length() - 1])
+            mask ^= lowest_bit
+        return bonds
     
     def slicing(self, bond):
         """
@@ -55,6 +94,7 @@ class AbstractTensorNetwork:
         tensors = self.bond_tensors.pop(bond)
         for tensor_id in tensors:
             self.tensor_bonds[tensor_id].remove(bond)
+            self.tensor_bond_masks[tensor_id] &= ~self.bond_bitmasks[bond]
         self.slicing_bonds[bond] = dim
         self.slicing_bond_tensors[bond] = tensors
     
@@ -71,6 +111,7 @@ class AbstractTensorNetwork:
         self.bond_tensors[bond] = tensors
         for tensor_id in tensors:
             self.tensor_bonds[tensor_id].append(bond)
+            self.tensor_bond_masks[tensor_id] |= self.bond_bitmasks[bond]
         return tensors
 
     def contract(self, x, y):

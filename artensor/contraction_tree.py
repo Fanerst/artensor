@@ -38,13 +38,19 @@ class ContractionVertex:
         self.left = left
         self.right = right
         if left and right:
+            self.contain_tensor_mask = left.contain_tensor_mask | right.contain_tensor_mask
             self.tc, self.sc, self.multiconfig_factor, self.contain_bonds, self.mc, self.contract_bonds, self.all_bonds = \
                 get_tc_sc_contraction(tn, left, right)
         else:
+            tensor_id = list(contain_tensors)[0]
+            self.contain_tensor_mask = tn.tensor_bitmasks[tensor_id]
             self.tc, self.sc, self.multiconfig_factor, self.contain_bonds, self.mc = \
                 get_tc_sc_inner(tn, contain_tensors)
             self.all_bonds = self.contain_bonds
             self.contract_bonds = set()
+        self.contain_bonds_mask = tn.bonds_to_mask(self.contain_bonds)
+        self.all_bonds_mask = tn.bonds_to_mask(self.all_bonds)
+        self.contract_bonds_mask = tn.bonds_to_mask(self.contract_bonds)
 
     def is_leaf(self):
         if self.left and self.right:
@@ -69,9 +75,10 @@ def get_tc_sc_inner(tn:AbstractTensorNetwork, part):
     return tc, sc, resulting_bonds and mc
     """
     assert len(part) == 1
-    bonds1 = set(tn.tensor_bonds[list(part)[0]])# bonds_out(tn.tensor_bonds, part)
+    tensor_id = list(part)[0]
+    bonds1 = set(tn.tensor_bonds[tensor_id])# bonds_out(tn.tensor_bonds, part)
     multiconfig_factor = min(tn.log2_max_bitstring, final_qubits_num(tn.num_fq, part))
-    return 0.0, log2_accum_cached(tn.log2_bond_dims, bonds1) + multiconfig_factor, multiconfig_factor, bonds1, 0.0
+    return 0.0, tn.sum_log2_dims_mask(tn.tensor_bond_masks[tensor_id]) + multiconfig_factor, multiconfig_factor, bonds1, 0.0
 
 
 def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, right:ContractionVertex):
@@ -85,16 +92,27 @@ def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, righ
 
 def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
     contracted_tensors = left.contain_tensors | right.contain_tensors
-    all_bonds = left.contain_bonds | right.contain_bonds
-    common_bonds = left.contain_bonds & right.contain_bonds
-    contract_bonds = {bond for bond in common_bonds if tn.bond_tensors[bond].issubset(contracted_tensors)}
-    result_bonds = all_bonds - contract_bonds
+    contracted_tensor_mask = left.contain_tensor_mask | right.contain_tensor_mask
+    all_bonds_mask = left.contain_bonds_mask | right.contain_bonds_mask
+    common_bonds_mask = left.contain_bonds_mask & right.contain_bonds_mask
+    contract_bonds_mask = 0
+    remaining_common = common_bonds_mask
+    while remaining_common:
+        lowest_bit = remaining_common & -remaining_common
+        bond = tn._bond_ids[lowest_bit.bit_length() - 1]
+        if tn.bond_tensor_masks[bond] & contracted_tensor_mask == tn.bond_tensor_masks[bond]:
+            contract_bonds_mask |= lowest_bit
+        remaining_common ^= lowest_bit
+    result_bonds_mask = all_bonds_mask & ~contract_bonds_mask
+    all_bonds = set(tn.mask_to_bonds(all_bonds_mask))
+    result_bonds = set(tn.mask_to_bonds(result_bonds_mask))
+    contract_bonds = set(tn.mask_to_bonds(contract_bonds_mask))
     combined_multiconfig_factor = left.multiconfig_factor + right.multiconfig_factor
     multiconfig_factor = min(tn.log2_max_bitstring, combined_multiconfig_factor)
 
-    all_bonds_cost = log2_accum_cached(tn.log2_bond_dims, all_bonds)
-    tc = all_bonds_cost if contract_bonds else all_bonds_cost - 1
-    sc = log2_accum_cached(tn.log2_bond_dims, result_bonds)
+    all_bonds_cost = tn.sum_log2_dims_mask(all_bonds_mask)
+    tc = all_bonds_cost if contract_bonds_mask else all_bonds_cost - 1
+    sc = tn.sum_log2_dims_mask(result_bonds_mask)
     tc += multiconfig_factor
     sc += multiconfig_factor
     if combined_multiconfig_factor > tn.log2_max_bitstring:
@@ -120,10 +138,13 @@ def candidate_local_tree_score(tn, first, second, third):
         merge_vertex_info(tn, first, second)
     mid = SimpleNamespace(
         contain_tensors=mid_tensors,
+        contain_tensor_mask=first.contain_tensor_mask | second.contain_tensor_mask,
         contain_bonds=mid_bonds,
+        contain_bonds_mask=tn.bonds_to_mask(mid_bonds),
         multiconfig_factor=mid_multiconfig_factor,
         sc=mid_sc,
         all_bonds=mid_all_bonds,
+        all_bonds_mask=tn.bonds_to_mask(mid_all_bonds),
         contract_bonds=mid_contract_bonds
     )
     _, root_tc, root_sc, _, _, root_mc, _, _ = merge_vertex_info(tn, mid, third)
@@ -257,15 +278,37 @@ class ContractionTree:
         """
         if target_sc is None:
             _, target_sc, _ = self.tree_complexity()
+        bond_counter = self._peak_bond_counter(target_sc)
+        return max(
+            bond_counter,
+            key=lambda bond: (
+                bond_counter[bond],
+                self.tn.log2_bond_dims[bond],
+                bond if isinstance(bond, int) else str(bond),
+            )
+        )
+
+    def _peak_bond_counter(self, target_sc):
         bond_counter = Counter()
         for vertex in self.tree.values():
             if vertex.sc == target_sc:
                 bond_counter.update(vertex.contain_bonds)
         assert bond_counter
-        return max(
+        return bond_counter
+
+    def ranked_slicing_bonds(self, target_sc=None, limit=4):
+        if target_sc is None:
+            _, target_sc, _ = self.tree_complexity()
+        bond_counter = self._peak_bond_counter(target_sc)
+        ranked = sorted(
             bond_counter,
-            key=lambda bond: (bond_counter[bond], self.tn.log2_bond_dims[bond], str(bond))
+            key=lambda bond: (
+                -bond_counter[bond],
+                -self.tn.log2_bond_dims[bond],
+                bond if isinstance(bond, int) else str(bond),
+            ),
         )
+        return ranked[:limit]
 
     def slicing(self, bond):
         """
@@ -274,7 +317,7 @@ class ContractionTree:
         self.tn.slicing(bond)
         # print(bond, len(self.tree.values()))
         for vertex in self.vertex_list():# self.tree.values():
-            if bond in vertex.all_bonds:
+            if vertex.all_bonds_mask & self.tn.bond_bitmasks[bond]:
             # if bond in vertex.contain_bonds or (vertex.left and bond in vertex.left.contain_bonds) or (vertex.right and bond in vertex.right.contain_bonds):
                 # print('-'*20)
                 # print(vertex.contain_tensors, vertex.contain_bonds, vertex.tc, vertex.sc)
@@ -293,7 +336,10 @@ class ContractionTree:
         """
         tensors = self.tn.add_bond(bond)
         for vertex in self.vertex_list():# self.tree.values():
-            if tensors & vertex.contain_tensors:
+            tensor_mask = 0
+            for tensor_id in tensors:
+                tensor_mask |= self.tn.tensor_bitmasks[tensor_id]
+            if tensor_mask & vertex.contain_tensor_mask:
                 vertex.update_info(vertex.contain_tensors, self.tn, vertex.left, vertex.right)
 
     def slicing_tree_complexity(self, bond):
@@ -312,14 +358,15 @@ class ContractionTree:
         tcs, mcs, scs = [], [], []
         for vertex in self.tree.values():
             # print(vertex.contain_tensors, vertex.contain_bonds, vertex.tc, vertex.sc, vertex.mc)
-            if bond in vertex.all_bonds:
-                sc = vertex.sc - log2(self.tn.bond_dims[bond]) if bond in vertex.contain_bonds else vertex.sc
+            bond_mask = self.tn.bond_bitmasks[bond]
+            if vertex.all_bonds_mask & bond_mask:
+                sc = vertex.sc - log2(self.tn.bond_dims[bond]) if vertex.contain_bonds_mask & bond_mask else vertex.sc
                 if vertex.left and vertex.right:
                     tc = vertex.tc - log2(self.tn.bond_dims[bond])
-                    if bond in vertex.contract_bonds and len(vertex.contract_bonds) == 1:
+                    if vertex.contract_bonds_mask & bond_mask and vertex.contract_bonds_mask.bit_count() == 1:
                         tc -= 1
-                    sc_left = vertex.left.sc - log2(self.tn.bond_dims[bond]) if bond in vertex.left.all_bonds else vertex.left.sc
-                    sc_right = vertex.right.sc - log2(self.tn.bond_dims[bond]) if bond in vertex.right.all_bonds else vertex.right.sc
+                    sc_left = vertex.left.sc - log2(self.tn.bond_dims[bond]) if vertex.left.all_bonds_mask & bond_mask else vertex.left.sc
+                    sc_right = vertex.right.sc - log2(self.tn.bond_dims[bond]) if vertex.right.all_bonds_mask & bond_mask else vertex.right.sc
                     mc = log2sumexp2([sc_left, sc_right, sc])
                     tcs.append(tc)
                     scs.append(sc)

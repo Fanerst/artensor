@@ -72,6 +72,23 @@ def reduce_slices(tree, sc_target, alpha):
     return tree
 
 
+def select_ranked_slicing_bond(tree, current_sc, sc_target, alpha, candidate_limit=4):
+    candidate_bonds = tree.ranked_slicing_bonds(current_sc, limit=candidate_limit)
+    slicing_scores = []
+    for bond in candidate_bonds:
+        tc_slicing, sc_slicing, mc_slicing = tree.slicing_tree_complexity_new(bond)
+        slicing_scores.append(
+            (
+                score_fn(tc_slicing, sc_slicing, mc_slicing, sc_target, alpha),
+                bond,
+                tc_slicing,
+                sc_slicing,
+                mc_slicing,
+            )
+        )
+    return min(slicing_scores, key=lambda item: item[0])[1]
+
+
 def simulate_annealing(
         tensor_network, sc_target=-1, trials=10, iters=50, betas=np.linspace(0.1, 10, 100), 
         slicing_repeat=4, start_seed=0, alpha=32.0, update_mode="optimized"
@@ -152,21 +169,13 @@ def sa_trial(
         tree = restore_tree(base_tensor_network, best_result[1])
         current_tc, current_sc, current_mc = tree.tree_complexity()
         while current_sc > sc_target:
-            candidate_bonds = tree.ranked_slicing_bonds(current_sc, limit=4)
-            slicing_scores = []
-            for bond in candidate_bonds:
-                tc_slicing, sc_slicing, mc_slicing = tree.slicing_tree_complexity_new(bond)
-                slicing_scores.append(
-                    (
-                        score_fn(tc_slicing, sc_slicing, mc_slicing, sc_target, alpha),
-                        bond,
-                        tc_slicing,
-                        sc_slicing,
-                        mc_slicing,
-                    )
-                )
-            slicing_bond = min(slicing_scores, key=lambda item: item[0])[1]
+            slicing_bond = select_ranked_slicing_bond(tree, current_sc, sc_target, alpha)
             tree.slicing(slicing_bond)
+            refine_betas = betas[-min(3, len(betas)):]
+            refine_iters = max(1, min(2, iters))
+            for beta in refine_betas:
+                for _ in range(refine_iters):
+                    tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=sc_target, alpha=alpha)
             current_tc, current_sc, current_mc = tree.tree_complexity()
         reduce_slices(tree, sc_target, alpha)
         current_tc, current_sc, current_mc = tree.tree_complexity()
@@ -178,7 +187,7 @@ def sa_trial(
         )
         best_result = (result, snapshot_tree(tree))
         refine_betas = betas[-min(4, len(betas)):]
-        refine_iters = max(1, min(3, iters))
+        refine_iters = max(1, min(2, iters))
         for beta in refine_betas:
             for iter in range(refine_iters):
                 tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=sc_target, alpha=alpha)

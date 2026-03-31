@@ -279,25 +279,29 @@ def tree_update(vertex, tree, beta, rng, sc_target=30.0, alpha=32.0):
     if vertex is None or not (vertex.left and vertex.right):
         return
 
-    local_update = tree.select_local_update(vertex)
-    if local_update is not None:
-        side, branch, outer, first, second = local_update
-        tc_tree, sc_tree, mc_tree = local_tree_score(branch, vertex, (first, second, outer))
-        reference_score = score_fn(tc_tree, sc_tree, mc_tree, sc_target, alpha)
-        if side == "left":
-            candidates = (
-                candidate_local_tree_score(tree.tn, first, outer, second),
-                candidate_local_tree_score(tree.tn, second, outer, first),
-            )
-        else:
-            candidates = (
-                candidate_local_tree_score(tree.tn, outer, second, first),
-                candidate_local_tree_score(tree.tn, outer, first, second),
-            )
-        choice = rng.choice(2)
-        tc_new, sc_new, mc_new = candidates[choice]
-        score_new = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
-        if rng.rand() < np.exp(-beta * (score_new - reference_score)):
+    local_updates = tree.iter_local_updates(vertex)
+    if local_updates:
+        candidate_moves = []
+        for side, branch, outer, first, second in local_updates:
+            tc_tree, sc_tree, mc_tree = local_tree_score(branch, vertex, (first, second, outer))
+            reference_score = score_fn(tc_tree, sc_tree, mc_tree, sc_target, alpha)
+            if side == "left":
+                candidates = (
+                    candidate_local_tree_score(tree.tn, first, outer, second),
+                    candidate_local_tree_score(tree.tn, second, outer, first),
+                )
+            else:
+                candidates = (
+                    candidate_local_tree_score(tree.tn, outer, second, first),
+                    candidate_local_tree_score(tree.tn, outer, first, second),
+                )
+            for choice, (tc_new, sc_new, mc_new) in enumerate(candidates):
+                score_new = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
+                candidate_moves.append(
+                    (score_new - reference_score, side, branch, outer, first, second, choice)
+                )
+        delta_score, side, branch, outer, first, second, choice = candidate_moves[rng.choice(len(candidate_moves))]
+        if rng.rand() < np.exp(-beta * delta_score):
             tree.apply_local_update(vertex, side, branch, outer, first, second, choice)
 
     for next_vertex in (vertex.left, vertex.right):

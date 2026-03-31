@@ -224,15 +224,16 @@ class ContractionTree:
 
         return vertex_list
 
-    def select_local_update(self, root):
+    def iter_local_updates(self, root):
         left, right = root.left, root.right
         if not (left and right):
-            return None
+            return ()
+        updates = []
         if left.left and left.right:
-            return "left", left, right, left.left, left.right
+            updates.append(("left", left, right, left.left, left.right))
         if right.left and right.right:
-            return "right", right, left, right.left, right.right
-        return None
+            updates.append(("right", right, left, right.left, right.right))
+        return tuple(updates)
 
     def apply_local_update(self, root, side, branch, outer, first, second, choice):
         old_key = branch.contain_tensors

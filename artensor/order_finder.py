@@ -4,7 +4,7 @@ import numpy as np
 import sys
 from copy import deepcopy
 from .greedy import GreedyOrderFinder
-from .contraction_tree import ContractionTree
+from .contraction_tree import ContractionTree, candidate_local_tree_score, local_tree_score
 from .tensor_network import AbstractTensorNetwork
 
 
@@ -16,9 +16,21 @@ def score_fn(tc, sc, mc, sc_target=30.0, alpha=32.0, sc_weight=2.0):
         sc_weight * log10(2) * max(0, sc - sc_target)
 
 
+def snapshot_tree(tree):
+    return tree.tree_to_order(), tuple(sorted(tree.tn.slicing_bonds))
+
+
+def restore_tree(base_tensor_network, snapshot):
+    order, slicing_bonds = snapshot
+    tensor_network = deepcopy(base_tensor_network)
+    for bond in slicing_bonds:
+        tensor_network.slicing(bond)
+    return ContractionTree(tensor_network, order, 0)
+
+
 def simulate_annealing(
         tensor_network, sc_target=-1, trials=10, iters=50, betas=np.linspace(0.1, 10, 100), 
-        slicing_repeat=4, start_seed=0, alpha=32.0
+        slicing_repeat=4, start_seed=0, alpha=32.0, update_mode="optimized"
     ):
     greedy_order = GreedyOrderFinder(tensor_network)
     # order, tc, sc = greedy_order('min_dim', seed)
@@ -40,11 +52,14 @@ def simulate_annealing(
     args = [
         (
             init_tree[i].copy(), sc_target, init_tree[i].tree_complexity(), 
-            iters, betas, start_seed + i, slicing_repeat, alpha
+            iters, betas, start_seed + i, slicing_repeat, alpha, update_mode
         ) for i in range(trials)]
-    p = mp.Pool(trials)
-    results = p.starmap(sa_trial, args)
-    p.close()
+    if update_mode == "optimized" and trials == 1:
+        results = [sa_trial(*args[0])]
+    else:
+        p = mp.Pool(trials)
+        results = p.starmap(sa_trial, args)
+        p.close()
     results_slicing = [
         (result[0][1] + len(result[1].tn.slicing_bonds) * log10(2), result[1]) 
         for result in results
@@ -56,47 +71,61 @@ def simulate_annealing(
 
 def sa_trial(
         tree, sc_target, init_result, iters, betas, seed, 
-        slicing_repeat=4, alpha=32.0
+        slicing_repeat=4, alpha=32.0, update_mode="optimized"
     ):
     init_tc, init_sc, init_mc = init_result
     init_score = score_fn(init_tc, init_sc, init_mc, sc_target, alpha)
-    best_result = [(init_score, init_tc, init_sc, init_mc), tree.copy()]
-    sub_root = tree.tree[tree.all_tensors]
+    base_tensor_network = deepcopy(tree.tn)
+    if update_mode == "legacy":
+        best_result = [(init_score, init_tc, init_sc, init_mc), tree.copy()]
+    else:
+        best_result = [(init_score, init_tc, init_sc, init_mc), snapshot_tree(tree)]
     rng = np.random.RandomState(seed)
+    checkpoint_interval = 1 if update_mode == "legacy" else 10
     for beta in betas:
         for iter in range(iters):
-            tree_update(
-                sub_root, tree, 3, beta, init_sc, rng, 
-                sc_target=sc_target, alpha=alpha
-            )
+            if update_mode == "legacy":
+                tree_update_legacy(
+                    tree.tree[tree.all_tensors], tree, 3, beta, init_sc, rng,
+                    sc_target=sc_target, alpha=alpha
+                )
+            else:
+                tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=sc_target, alpha=alpha)
+            if (iter + 1) % checkpoint_interval != 0 and iter + 1 != iters:
+                continue
             tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
             result = (
                 score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target, alpha), 
                 tc_tmp, sc_tmp, mc_tmp
             )
             if result[0] < best_result[0][0]:
-                best_result = [result, tree.copy()]
+                best_result = [result, tree.copy()] if update_mode == "legacy" else [result, snapshot_tree(tree)]
     
-    result = best_result[1].tree_complexity()
+    best_tree = best_result[1] if update_mode == "legacy" else restore_tree(base_tensor_network, best_result[1])
+    result = best_tree.tree_complexity()
     optimized_sc = result[1]
     slicing_loop = 0
-    while slicing_loop < slicing_repeat * (optimized_sc - sc_target) or best_result[0][2] > sc_target:
-        tree = best_result[1]
+    slicing_ratio = slicing_repeat if update_mode == "legacy" else min(2, slicing_repeat)
+    while slicing_loop < slicing_ratio * max(0, optimized_sc - sc_target) or best_result[0][2] > sc_target:
+        tree = best_result[1] if update_mode == "legacy" else restore_tree(base_tensor_network, best_result[1])
         current_tc, current_sc, current_mc = tree.tree_complexity()
         if current_sc > sc_target:
-            scores_slicing = []
-            for bond in tree.select_slicing_bonds():
-                tc_slicing, sc_slicing, mc_slicing = tree.slicing_tree_complexity_new(bond)
-                scores_slicing.append(
-                    (
-                        bond, 
-                        score_fn(tc_slicing, sc_slicing, mc_slicing, sc_target, alpha), 
-                        tc_slicing, sc_slicing, mc_slicing
+            if update_mode == "legacy":
+                scores_slicing = []
+                for bond in tree.select_slicing_bonds():
+                    tc_slicing, sc_slicing, mc_slicing = tree.slicing_tree_complexity_new(bond)
+                    scores_slicing.append(
+                        (
+                            bond,
+                            score_fn(tc_slicing, sc_slicing, mc_slicing, sc_target, alpha),
+                            tc_slicing, sc_slicing, mc_slicing
+                        )
                     )
-                )
-            slicing_bond = sorted(scores_slicing, key=lambda info:info[1])[0][0]
+                slicing_bond = sorted(scores_slicing, key=lambda info: info[1])[0][0]
+            else:
+                slicing_bond = tree.select_slicing_bond_heuristic(current_sc)
             tree.slicing(slicing_bond)
-        elif len(tree.tn.slicing_bonds) > 0:
+        elif update_mode == "legacy" and len(tree.tn.slicing_bonds) > 0:
             bond_add = rng.choice(list(tree.tn.slicing_bonds.keys()))
             tree.add_bond(bond_add)
         tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
@@ -104,23 +133,29 @@ def sa_trial(
             score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target, alpha), 
             tc_tmp, sc_tmp, mc_tmp
         )
-        best_result = (result, tree.copy())
+        best_result = (result, tree.copy()) if update_mode == "legacy" else (result, snapshot_tree(tree))
         for beta in betas[-10:]:
             for iter in range(iters):
-                sub_root = tree.tree[tree.all_tensors]
-                tree_update(
-                    sub_root, tree, 3, beta, sc_target, rng, 
-                    sc_target=sc_target, alpha=alpha
-                )
+                if update_mode == "legacy":
+                    tree_update_legacy(
+                        tree.tree[tree.all_tensors], tree, 3, beta, sc_target, rng,
+                        sc_target=sc_target, alpha=alpha
+                    )
+                else:
+                    tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=sc_target, alpha=alpha)
+                if (iter + 1) % checkpoint_interval != 0 and iter + 1 != iters:
+                    continue
                 tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
                 result = (
                     score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target, alpha), 
                     tc_tmp, sc_tmp, mc_tmp
                 )
                 if result[0] < best_result[0][0]:
-                    best_result = (result, tree.copy())
+                    best_result = (result, tree.copy()) if update_mode == "legacy" else (result, snapshot_tree(tree))
         slicing_loop += 1
-    return best_result
+    if update_mode == "legacy":
+        return best_result
+    return best_result[0], restore_tree(base_tensor_network, best_result[1])
 
 
 def determine_old_order(vertex, local_tree_leaves):
@@ -144,7 +179,39 @@ def determine_old_order(vertex, local_tree_leaves):
         return [(1,2), (0,1)]
 
 
-def tree_update(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha=32.0):
+def tree_update(vertex, tree, beta, rng, sc_target=30.0, alpha=32.0):
+    """
+    Apply a lightweight local tree rotation update recursively.
+    """
+    if vertex is None or not (vertex.left and vertex.right):
+        return
+
+    local_update = tree.select_local_update(vertex)
+    if local_update is not None:
+        side, branch, outer, first, second = local_update
+        tc_tree, sc_tree, mc_tree = local_tree_score(branch, vertex, (first, second, outer))
+        reference_score = score_fn(tc_tree, sc_tree, mc_tree, sc_target, alpha)
+        if side == "left":
+            candidates = (
+                candidate_local_tree_score(tree.tn, first, outer, second),
+                candidate_local_tree_score(tree.tn, second, outer, first),
+            )
+        else:
+            candidates = (
+                candidate_local_tree_score(tree.tn, outer, second, first),
+                candidate_local_tree_score(tree.tn, outer, first, second),
+            )
+        choice = rng.choice(2)
+        tc_new, sc_new, mc_new = candidates[choice]
+        score_new = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
+        if rng.rand() < np.exp(-beta * (score_new - reference_score)):
+            tree.apply_local_update(vertex, side, branch, outer, first, second, choice)
+
+    for next_vertex in (vertex.left, vertex.right):
+        tree_update(next_vertex, tree, beta, rng, sc_target, alpha)
+
+
+def tree_update_legacy(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha=32.0):
     """
     Local update of the contraction tree in a recursive way.
     For each step, get the size 3 subtree of current contraction vertex and find out the possible
@@ -168,7 +235,7 @@ def tree_update(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha
             tree.apply_order(order_new, local_tree_leaves, local_tree, vertex)
 
         for next_vertex in [vertex.left, vertex.right]:
-            tree_update(next_vertex, tree, size, beta, initial_sc, rng, sc_target, alpha)
+            tree_update_legacy(next_vertex, tree, size, beta, initial_sc, rng, sc_target, alpha)
 
 
 def find_order(

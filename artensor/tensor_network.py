@@ -1,5 +1,10 @@
 from math import log2
 
+try:
+    import torch
+except ImportError:  # pragma: no cover - optional dependency for numerical contraction only
+    torch = None
+
 
 class AbstractTensorNetwork:
     def __init__(
@@ -23,6 +28,7 @@ class AbstractTensorNetwork:
         """
         self.tensor_bonds = tensor_bonds
         self.bond_dims = bond_dims
+        self.log2_bond_dims = {bond: log2(dim) for bond, dim in bond_dims.items()}
         self.bond_tensors = {bond: set() for bond in self.bond_dims.keys()} # determine tensors corresponding to each bond
         for i in tensor_bonds.keys():
             for j in tensor_bonds[i]:
@@ -45,6 +51,7 @@ class AbstractTensorNetwork:
         assert bond in self.bond_dims.keys()
         assert bond not in self.slicing_bonds.keys()
         dim = self.bond_dims.pop(bond)
+        self.log2_bond_dims.pop(bond)
         tensors = self.bond_tensors.pop(bond)
         for tensor_id in tensors:
             self.tensor_bonds[tensor_id].remove(bond)
@@ -60,6 +67,7 @@ class AbstractTensorNetwork:
         dim = self.slicing_bonds.pop(bond)
         tensors = self.slicing_bond_tensors.pop(bond)
         self.bond_dims[bond] = dim
+        self.log2_bond_dims[bond] = log2(dim)
         self.bond_tensors[bond] = tensors
         for tensor_id in tensors:
             self.tensor_bonds[tensor_id].append(bond)
@@ -157,9 +165,6 @@ class AbstractTensorNetwork:
         #     ]
         #     for bond in bond_batch: self.tensor_bonds[tid].discard(bond)
 
-
-import torch
-
 ALLOW_ACSII = list(range(65, 90)) + list(range(97, 122))
 LETTES = [chr(ALLOW_ACSII[i]) for i in range(len(ALLOW_ACSII))]
 
@@ -181,6 +186,8 @@ class NumericalTensorNetwork(AbstractTensorNetwork):
             self, tensors:dict, tensor_bonds:dict, bond_dims:dict, 
             final_qubits=[], max_bitstring=1
         ) -> None:
+        if torch is None:
+            raise ImportError("NumericalTensorNetwork requires PyTorch to be installed.")
         super().__init__(tensor_bonds, bond_dims, final_qubits, max_bitstring)
         self.tensors = tensors
         assert self.tensor_bonds.keys() == self.tensors.keys()

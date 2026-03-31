@@ -309,7 +309,7 @@ def tree_update(vertex, tree, beta, rng, sc_target=30.0, alpha=32.0):
                     (score_new - reference_score, side, branch, outer, first, second, choice)
                 )
         delta_score, side, branch, outer, first, second, choice = candidate_moves[rng.choice(len(candidate_moves))]
-        if rng.rand() < np.exp(-beta * delta_score):
+        if delta_score <= 0 or rng.rand() < np.exp(-beta * delta_score):
             tree.apply_local_update(vertex, side, branch, outer, first, second, choice)
 
     for next_vertex in (vertex.left, vertex.right):
@@ -336,7 +336,8 @@ def tree_update_legacy(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0
         score_new = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
 
 
-        if rng.rand() < np.exp(-beta * (score_new-reference_score)):
+        delta_score = score_new - reference_score
+        if delta_score <= 0 or rng.rand() < np.exp(-beta * delta_score):
             tree.apply_order(order_new, local_tree_leaves, local_tree, vertex)
 
         for next_vertex in [vertex.left, vertex.right]:

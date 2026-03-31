@@ -9,7 +9,7 @@ except ImportError:  # pragma: no cover - optional dependency for numerical cont
 class AbstractTensorNetwork:
     def __init__(
             self, tensor_bonds:dict, bond_dims:dict, 
-            final_qubits=[], max_bitstring=1
+            final_qubits=[], max_bitstring=1, open_bonds=None
         ) -> None:
         """
         Class of abstract tensor network
@@ -29,6 +29,7 @@ class AbstractTensorNetwork:
         self.tensor_bonds = tensor_bonds
         self.bond_dims = bond_dims
         self.log2_bond_dims = {bond: log2(dim) for bond, dim in bond_dims.items()}
+        self.open_bonds = set(open_bonds or [])
         self._tensor_ids = tuple(tensor_bonds.keys())
         self._bond_ids = tuple(self.bond_dims.keys())
         self.bond_index = {bond: idx for idx, bond in enumerate(self._bond_ids)}

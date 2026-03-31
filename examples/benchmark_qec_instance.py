@@ -44,6 +44,7 @@ def main():
         tensor_bonds,
         bond_dims,
         sc_target=args.sc_target,
+        open_bonds=[output],
         trials=1,
         iters=args.iters,
         betas=betas,

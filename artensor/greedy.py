@@ -34,7 +34,7 @@ class GreedyOrderFinder:
         common_bonds = self.contain_bonds[i] & self.contain_bonds[j]
         contract_bonds = set(
             bond for bond in common_bonds
-            if self.tn.bond_tensors[bond].issubset(contracted_tensors)
+            if bond not in self.tn.open_bonds and self.tn.bond_tensors[bond].issubset(contracted_tensors)
         )
         result_bonds = all_bonds - contract_bonds
         factor = min(self.tn.log2_max_bitstring, final_qubits_num(self.tn.num_fq, contracted_tensors))
@@ -70,7 +70,7 @@ class GreedyOrderFinder:
         common_bonds = self.contain_bonds[i] & self.contain_bonds[j]
         contract_bonds = set(
             bond for bond in common_bonds
-            if self.tn.bond_tensors[bond].issubset(contracted_tensors)
+            if bond not in self.tn.open_bonds and self.tn.bond_tensors[bond].issubset(contracted_tensors)
         )
         result_bonds = all_bonds - contract_bonds
 
@@ -161,7 +161,7 @@ class GreedyOrderFinder:
         while remaining_common:
             lowest_bit = remaining_common & -remaining_common
             bond = self.tn._bond_ids[lowest_bit.bit_length() - 1]
-            if self.tn.bond_tensor_masks[bond] & contracted_tensor_mask == self.tn.bond_tensor_masks[bond]:
+            if bond not in self.tn.open_bonds and self.tn.bond_tensor_masks[bond] & contracted_tensor_mask == self.tn.bond_tensor_masks[bond]:
                 contract_bonds_mask |= lowest_bit
             remaining_common ^= lowest_bit
         result_bonds_mask = all_bonds_mask & ~contract_bonds_mask
@@ -195,10 +195,10 @@ class GreedyOrderFinder:
         if i == j or not self.active[i] or not self.active[j]:
             return
         a, b = (i, j) if i < j else (j, i)
-        value, _, _, _, _, _ = self._pair_score_fast(a, b)
+        value, tc, _, _, _, _ = self._pair_score_fast(a, b)
         version = self.pair_versions.get((a, b), 0) + 1
         self.pair_versions[(a, b)] = version
-        heapq.heappush(self.pair_heap, (value, self.rng.random_sample(), a, b, version))
+        heapq.heappush(self.pair_heap, (value, tc, a, b, version))
 
     def _pop_best_pair(self):
         while self.pair_heap:
@@ -243,7 +243,6 @@ class GreedyOrderFinder:
 
     def greedy_order_fast(self, seed):
         n = len(self.tn.tensor_bonds)
-        self.rng = np.random.RandomState(seed)
         self.log2_max_bitstring_ceil = ceil(self.tn.log2_max_bitstring)
         self.active = [True] * n
         self.component_tensor_masks = [self.tn.tensor_bitmasks[i] for i in range(n)]

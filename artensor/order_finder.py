@@ -346,6 +346,7 @@ def tree_update_legacy(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0
 
 def find_order(
         tensor_bonds, bond_dims, final_qubits=[], seed=0, max_bitstrings=1, 
+        open_bonds=None,
         **simulated_annnealing_args
     ):
     """
@@ -355,11 +356,17 @@ def find_order(
         deepcopy(tensor_bonds),
         deepcopy(bond_dims),
     )
+    compressed_open_bonds = None
+    if open_bonds:
+        bond_to_int = {bond: idx for idx, bond in int_to_bond.items()}
+        compressed_open_bonds = [bond_to_int[bond] for bond in open_bonds]
     tensor_network = AbstractTensorNetwork(
         compressed_tensor_bonds,
         compressed_bond_dims,
         final_qubits,
-        max_bitstrings)
+        max_bitstrings,
+        compressed_open_bonds,
+    )
     # greedy_order = GreedyOrderFinder(tensor_network)
     # order, tc, sc = greedy_order('min_dim', seed)
     # ctree = ContractionTree(deepcopy(tensor_network), order, seed)

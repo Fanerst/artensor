@@ -100,7 +100,7 @@ def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
     while remaining_common:
         lowest_bit = remaining_common & -remaining_common
         bond = tn._bond_ids[lowest_bit.bit_length() - 1]
-        if tn.bond_tensor_masks[bond] & contracted_tensor_mask == tn.bond_tensor_masks[bond]:
+        if bond not in tn.open_bonds and tn.bond_tensor_masks[bond] & contracted_tensor_mask == tn.bond_tensor_masks[bond]:
             contract_bonds_mask |= lowest_bit
         remaining_common ^= lowest_bit
     result_bonds_mask = all_bonds_mask & ~contract_bonds_mask

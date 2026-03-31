@@ -27,7 +27,15 @@ def score_fn(tc, sc, mc, sc_target=30.0, alpha=32.0, sc_weight=2.0):
     """
     Score function for finding order
     """
-    return log10(alpha * 10 ** mc + 10 ** tc) + \
+    if tc >= mc:
+        lead = tc
+        tail = alpha * 10 ** (mc - tc)
+    else:
+        lead = mc
+        tail = (10 ** (tc - mc)) / alpha
+        return log10(alpha) + lead + log10(1 + tail) + \
+            sc_weight * log10(2) * max(0, sc - sc_target)
+    return lead + log10(1 + tail) + \
         sc_weight * log10(2) * max(0, sc - sc_target)
 
 

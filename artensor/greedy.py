@@ -284,13 +284,159 @@ class GreedyOrderFinder:
         sc = max(scs)
         return order, tc, sc
 
+    def _incident_neighbors(self, vertex):
+        neighbors = set()
+        for bond in self.vertex_edges[vertex]:
+            neighbors |= self.edge_vertices[bond]
+        neighbors.discard(vertex)
+        return neighbors
+
+    def _compute_contraction_dims(self, vi, vj, with_edges=False):
+        ei = self.vertex_edges[vi]
+        ej = self.vertex_edges[vj]
+        eout = [] if with_edges else None
+        eremove = [] if with_edges else None
+        d1 = d2 = d12 = d01 = d02 = d012 = 0.0
+
+        for leg in ei:
+            vertices = self.edge_vertices[leg]
+            is_external = leg in self.tn.open_bonds or any(vertex != vi and vertex != vj for vertex in vertices)
+            in_ej = leg in ej
+            leg_size = self.tn.log2_bond_dims[leg]
+            if is_external:
+                if eout is not None:
+                    eout.append(leg)
+                if in_ej:
+                    d012 += leg_size
+                else:
+                    d01 += leg_size
+            else:
+                if eremove is not None:
+                    eremove.append(leg)
+                if in_ej:
+                    d12 += leg_size
+                else:
+                    d1 += leg_size
+
+        for leg in ej:
+            if leg in ei:
+                continue
+            vertices = self.edge_vertices[leg]
+            is_external = leg in self.tn.open_bonds or any(vertex != vi and vertex != vj for vertex in vertices)
+            leg_size = self.tn.log2_bond_dims[leg]
+            if is_external:
+                if eout is not None:
+                    eout.append(leg)
+                d02 += leg_size
+            else:
+                if eremove is not None:
+                    eremove.append(leg)
+                d2 += leg_size
+
+        if with_edges:
+            return d1, d2, d12, d01, d02, d012, eout, eremove
+        return d1, d2, d12, d01, d02, d012
+
+    def _push_incidence_pair(self, i, j):
+        if i == j or not self.active[i] or not self.active[j]:
+            return
+        a, b = (i, j) if i < j else (j, i)
+        d1, d2, d12, d01, d02, d012 = self._compute_contraction_dims(a, b)
+        sc = d01 + d02 + d012
+        tc = d12 + d01 + d02 + d012
+        version = self.pair_versions.get((a, b), 0) + 1
+        self.pair_versions[(a, b)] = version
+        heapq.heappush(self.pair_heap, (sc, tc, a, b, version))
+
+    def _pop_incidence_pair(self):
+        while self.pair_heap:
+            _, _, i, j, version = heapq.heappop(self.pair_heap)
+            if not (self.active[i] and self.active[j]):
+                continue
+            if self.pair_versions.get((i, j)) != version:
+                continue
+            return i, j
+        return None
+
+    def _contract_incidence(self, i, j):
+        d1, d2, d12, d01, d02, d012, eout, eremove = self._compute_contraction_dims(i, j, with_edges=True)
+        tc = d12 + d01 + d02 + d012
+        sc = d01 + d02 + d012
+
+        old_i_neighbors = self._incident_neighbors(i)
+        old_j_neighbors = self._incident_neighbors(j)
+
+        self.active[j] = False
+        self.vertex_edges[j] = set()
+        self.vertex_edges[i] = set(eout)
+
+        for edge in eout:
+            vertices = self.edge_vertices[edge]
+            if j in vertices:
+                vertices.remove(j)
+                vertices.add(i)
+        for edge in eremove:
+            self.edge_vertices.pop(edge, None)
+
+        affected = old_i_neighbors | old_j_neighbors | self._incident_neighbors(i)
+        self.pair_versions.pop((i, j), None)
+        for neigh in affected:
+            self.pair_versions.pop((min(i, neigh), max(i, neigh)), None)
+            self.pair_versions.pop((min(j, neigh), max(j, neigh)), None)
+        for neigh in self._incident_neighbors(i):
+            self._push_incidence_pair(i, neigh)
+
+        return tc, sc
+
+    def greedy_order_incidence(self, seed):
+        n = len(self.tn.tensor_bonds)
+        self.active = [True] * n
+        self.vertex_edges = {
+            i: set(self.tn.tensor_bonds[i])
+            for i in range(n)
+        }
+        self.edge_vertices = {
+            bond: set(vertices)
+            for bond, vertices in self.tn.bond_tensors.items()
+        }
+        self.pair_heap = []
+        self.pair_versions = {}
+        for i in range(n):
+            for j in self._incident_neighbors(i):
+                if j > i:
+                    self._push_incidence_pair(i, j)
+
+        order = []
+        tcs = []
+        scs = [
+            sum(self.tn.log2_bond_dims[bond] for bond in self.vertex_edges[i])
+            for i in range(n)
+        ]
+        active_count = n
+        while active_count > 1:
+            pair = self._pop_incidence_pair()
+            if pair is None:
+                active_nodes = [idx for idx, alive in enumerate(self.active) if alive]
+                i, j = active_nodes[0], active_nodes[1]
+            else:
+                i, j = pair
+            tc_step, sc_step = self._contract_incidence(i, j)
+            order.append((i, j))
+            tcs.append(tc_step)
+            scs.append(sc_step)
+            active_count -= 1
+
+        tc = log10sumexp2(tcs)
+        sc = max(scs)
+        return order, tc, sc
+
     def __call__(self, strategy='min_dim', seed=0):
         """
         Call the class
         """
         self.strategy = strategy
         if strategy == 'min_dim':
-            return self.greedy_order_fast(seed)
+            return self.greedy_order_incidence(seed)
 
         self.contain_tensors = [set([i]) for i in range(len(self.tn.tensor_bonds))]
         self.contain_bonds = [set(self.tn.tensor_bonds[i]) for i in range(len(self.tn.tensor_bonds))]

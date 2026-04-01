@@ -33,6 +33,7 @@ def main():
     parser.add_argument("--beta-stop", type=float, default=10.0)
     parser.add_argument("--beta-steps", type=int, default=20)
     parser.add_argument("--alpha", type=float, default=64.0)
+    parser.add_argument("--greedy-alpha", type=float, default=0.0)
     parser.add_argument("--slicing-repeat", type=int, default=8)
     args = parser.parse_args()
 
@@ -51,6 +52,7 @@ def main():
         slicing_repeat=args.slicing_repeat,
         start_seed=args.seed,
         alpha=args.alpha,
+        greedy_alpha=args.greedy_alpha,
         update_mode="optimized",
     )
     elapsed = time.perf_counter() - start
@@ -66,6 +68,7 @@ def main():
         "tc": tc,
         "sc": sc,
         "mc": mc,
+        "greedy_alpha": args.greedy_alpha,
     }
     print(json.dumps(result, ensure_ascii=False))
 

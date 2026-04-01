@@ -1,5 +1,5 @@
 from .utils import final_qubits_num, log2_accum_cached, log10sumexp2
-from math import ceil
+from math import ceil, log2
 import heapq
 import numpy as np
 
@@ -15,6 +15,25 @@ class GreedyOrderFinder:
         -----------
         """
         self.tn = tensor_network
+
+    @staticmethod
+    def _loss_key(out_sc, in1_sc, in2_sc, alpha):
+        if alpha <= 0:
+            return (1, out_sc)
+        log_alpha = log2(alpha)
+        if in1_sc >= in2_sc:
+            hi, lo = in1_sc, in2_sc
+        else:
+            hi, lo = in2_sc, in1_sc
+        if hi == float("-inf"):
+            penalty = float("-inf")
+        else:
+            penalty = log_alpha + hi + log2(1 + 2 ** (lo - hi))
+        if out_sc <= penalty:
+            if out_sc == penalty:
+                return (0, float("-inf"))
+            return (0, penalty + log2(1 - 2 ** (out_sc - penalty)))
+        return (1, out_sc + log2(1 - 2 ** (penalty - out_sc)))
 
     def _construct_pair_info(self):
         """
@@ -344,13 +363,16 @@ class GreedyOrderFinder:
         d1, d2, d12, d01, d02, d012 = self._compute_contraction_dims(a, b)
         sc = d01 + d02 + d012
         tc = d12 + d01 + d02 + d012
+        left_sc = d01 + d12 + d012
+        right_sc = d02 + d12 + d012
+        loss_key = self._loss_key(sc, left_sc, right_sc, self.greedy_alpha)
         version = self.pair_versions.get((a, b), 0) + 1
         self.pair_versions[(a, b)] = version
-        heapq.heappush(self.pair_heap, (sc, tc, a, b, version))
+        heapq.heappush(self.pair_heap, (loss_key, sc, tc, a, b, version))
 
     def _pop_incidence_pair(self):
         while self.pair_heap:
-            _, _, i, j, version = heapq.heappop(self.pair_heap)
+            _, _, _, i, j, version = heapq.heappop(self.pair_heap)
             if not (self.active[i] and self.active[j]):
                 continue
             if self.pair_versions.get((i, j)) != version:
@@ -430,11 +452,12 @@ class GreedyOrderFinder:
         sc = max(scs)
         return order, tc, sc
 
-    def __call__(self, strategy='min_dim', seed=0):
+    def __call__(self, strategy='min_dim', seed=0, alpha=0.0):
         """
         Call the class
         """
         self.strategy = strategy
+        self.greedy_alpha = alpha
         if strategy == 'min_dim':
             return self.greedy_order_incidence(seed)
 

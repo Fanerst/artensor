@@ -99,7 +99,7 @@ def select_ranked_slicing_bond(tree, current_sc, sc_target, alpha, candidate_lim
 
 def simulate_annealing(
         tensor_network, sc_target=-1, trials=10, iters=50, betas=np.linspace(0.1, 10, 100), 
-        slicing_repeat=4, start_seed=0, alpha=32.0, update_mode="optimized"
+        slicing_repeat=4, start_seed=0, alpha=32.0, update_mode="optimized", greedy_alpha=0.0
     ):
     greedy_order = GreedyOrderFinder(tensor_network)
     # order, tc, sc = greedy_order('min_dim', seed)
@@ -113,7 +113,7 @@ def simulate_annealing(
     init_tree = [
         ContractionTree(
             deepcopy(tensor_network), 
-            greedy_order('min_dim', start_seed + i)[0], 
+            greedy_order('min_dim', start_seed + i, alpha=greedy_alpha)[0], 
             0
         )
         for i in range(trials)

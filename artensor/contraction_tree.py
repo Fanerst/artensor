@@ -1,5 +1,5 @@
 from .tensor_network import AbstractTensorNetwork
-from .utils import final_qubits_num, log2_accum_cached, log2sumexp2, log10sumexp2, log10sumexp2_pair
+from .utils import final_qubits_num, log2_accum_cached, log2sumexp2, log2sumexp2_triple, log10sumexp2, log10sumexp2_pair
 from math import log2, ceil
 from copy import deepcopy
 import numpy as np
@@ -116,38 +116,44 @@ def get_tc_sc_inner(tn:AbstractTensorNetwork, part):
 
 def _contract_bonds_mask(tn:AbstractTensorNetwork, common_bonds_mask, contracted_tensor_mask):
     contract_bonds_mask = 0
+    contract_bonds_cost = 0.0
     remaining_common = common_bonds_mask
+    bond_tensor_mask_array = tn.bond_tensor_mask_array
+    open_bond_mask = tn.open_bond_mask
+    bond_log2_dim_array = tn.bond_log2_dim_array
     while remaining_common:
         lowest_bit = remaining_common & -remaining_common
-        bond = tn._bond_ids[lowest_bit.bit_length() - 1]
-        if bond not in tn.open_bonds and tn.bond_tensor_masks[bond] & contracted_tensor_mask == tn.bond_tensor_masks[bond]:
+        bond_index = lowest_bit.bit_length() - 1
+        bond_tensor_mask = bond_tensor_mask_array[bond_index]
+        if not (open_bond_mask & lowest_bit) and bond_tensor_mask & contracted_tensor_mask == bond_tensor_mask:
             contract_bonds_mask |= lowest_bit
+            contract_bonds_cost += bond_log2_dim_array[bond_index]
         remaining_common ^= lowest_bit
-    return contract_bonds_mask
+    return contract_bonds_mask, contract_bonds_cost
 
 
 def merge_vertex_info_masks(tn:AbstractTensorNetwork, left, right):
     contracted_tensor_mask = left.contain_tensor_mask | right.contain_tensor_mask
     all_bonds_mask = left.contain_bonds_mask | right.contain_bonds_mask
     common_bonds_mask = left.contain_bonds_mask & right.contain_bonds_mask
-    contract_bonds_mask = _contract_bonds_mask(tn, common_bonds_mask, contracted_tensor_mask)
+    contract_bonds_mask, contract_bonds_cost = _contract_bonds_mask(tn, common_bonds_mask, contracted_tensor_mask)
     result_bonds_mask = all_bonds_mask & ~contract_bonds_mask
     combined_multiconfig_factor = left.multiconfig_factor + right.multiconfig_factor
     multiconfig_factor = min(tn.log2_max_bitstring, combined_multiconfig_factor)
 
     all_bonds_cost = tn.sum_log2_dims_mask(all_bonds_mask)
     tc = all_bonds_cost if contract_bonds_mask else all_bonds_cost - 1
-    sc = tn.sum_log2_dims_mask(result_bonds_mask)
+    sc = all_bonds_cost - contract_bonds_cost
     tc += multiconfig_factor
     sc += multiconfig_factor
     if combined_multiconfig_factor > tn.log2_max_bitstring:
-        mc = log2sumexp2([
+        mc = log2sumexp2_triple(
             left.sc - left.multiconfig_factor + multiconfig_factor,
             right.sc - right.multiconfig_factor + multiconfig_factor,
-            sc
-        ])
+            sc,
+        )
     else:
-        mc = log2sumexp2([left.sc, right.sc, sc])
+        mc = log2sumexp2_triple(left.sc, right.sc, sc)
     return tc, sc, multiconfig_factor, mc, result_bonds_mask, contract_bonds_mask, all_bonds_mask
 
 
@@ -190,24 +196,24 @@ def merge_candidate_vertex_with_node(
     contracted_tensor_mask = left_tensor_mask | right.contain_tensor_mask
     all_bonds_mask = left_bonds_mask | right.contain_bonds_mask
     common_bonds_mask = left_bonds_mask & right.contain_bonds_mask
-    contract_bonds_mask = _contract_bonds_mask(tn, common_bonds_mask, contracted_tensor_mask)
+    contract_bonds_mask, contract_bonds_cost = _contract_bonds_mask(tn, common_bonds_mask, contracted_tensor_mask)
     result_bonds_mask = all_bonds_mask & ~contract_bonds_mask
     combined_multiconfig_factor = left_multiconfig_factor + right.multiconfig_factor
     multiconfig_factor = min(tn.log2_max_bitstring, combined_multiconfig_factor)
 
     all_bonds_cost = tn.sum_log2_dims_mask(all_bonds_mask)
     tc = all_bonds_cost if contract_bonds_mask else all_bonds_cost - 1
-    sc = tn.sum_log2_dims_mask(result_bonds_mask)
+    sc = all_bonds_cost - contract_bonds_cost
     tc += multiconfig_factor
     sc += multiconfig_factor
     if combined_multiconfig_factor > tn.log2_max_bitstring:
-        mc = log2sumexp2([
+        mc = log2sumexp2_triple(
             left_sc - left_multiconfig_factor + multiconfig_factor,
             right.sc - right.multiconfig_factor + multiconfig_factor,
             sc,
-        ])
+        )
     else:
-        mc = log2sumexp2([left_sc, right.sc, sc])
+        mc = log2sumexp2_triple(left_sc, right.sc, sc)
     return tc, sc, mc
 
 
@@ -449,7 +455,7 @@ class ContractionTree:
                         tc -= 1
                     sc_left = vertex.left.sc - log2(self.tn.bond_dims[bond]) if vertex.left.all_bonds_mask & bond_mask else vertex.left.sc
                     sc_right = vertex.right.sc - log2(self.tn.bond_dims[bond]) if vertex.right.all_bonds_mask & bond_mask else vertex.right.sc
-                    mc = log2sumexp2([sc_left, sc_right, sc])
+                    mc = log2sumexp2_triple(sc_left, sc_right, sc)
                     tcs.append(tc)
                     scs.append(sc)
                     mcs.append(mc)

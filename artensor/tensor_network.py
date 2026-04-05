@@ -46,6 +46,9 @@ class AbstractTensorNetwork:
             bond: sum(self.tensor_bitmasks[tensor_id] for tensor_id in tensor_ids)
             for bond, tensor_ids in self.bond_tensors.items()
         }
+        self.bond_tensor_mask_array = [0] * len(self._bond_ids)
+        for bond, mask in self.bond_tensor_masks.items():
+            self.bond_tensor_mask_array[self.bond_index[bond]] = mask
         self.tensor_bond_masks = {
             tensor_id: self.bonds_to_mask(bonds)
             for tensor_id, bonds in self.tensor_bonds.items()
@@ -57,6 +60,7 @@ class AbstractTensorNetwork:
             self.num_fq = [0 for i in tensor_bonds.keys()]
         self.max_bitstring = max_bitstring
         self.log2_max_bitstring = log2(max_bitstring)
+        self.open_bond_mask = self.bonds_to_mask(self.open_bonds)
         self.slicing_bonds = {}
         self.slicing_bond_tensors = {}
         pass
@@ -81,11 +85,13 @@ class AbstractTensorNetwork:
             for bond, tensor_ids in self.bond_tensors.items()
         }
         clone.bond_tensor_masks = self.bond_tensor_masks.copy()
+        clone.bond_tensor_mask_array = self.bond_tensor_mask_array
         clone.tensor_bond_masks = self.tensor_bond_masks.copy()
         clone.final_qubits = self.final_qubits
         clone.num_fq = self.num_fq
         clone.max_bitstring = self.max_bitstring
         clone.log2_max_bitstring = self.log2_max_bitstring
+        clone.open_bond_mask = self.open_bond_mask
         clone.slicing_bonds = self.slicing_bonds.copy()
         clone.slicing_bond_tensors = {
             bond: tensor_ids.copy()

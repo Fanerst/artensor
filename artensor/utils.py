@@ -1,6 +1,7 @@
+from math import log2 as math_log2, log10 as math_log10
 import numpy as np
 
-LOG10_2 = np.log10(2.0)
+LOG10_2 = math_log10(2.0)
 
 
 def log2_accum_dims(bond_dims, bonds):
@@ -27,16 +28,24 @@ def log10sumexp2(s):
     if not values:
         return 0
     ms = max(values)
-    return np.log10(sum(np.exp2(value - ms) for value in values)) + ms * LOG10_2
+    return math_log10(sum(2.0 ** (value - ms) for value in values)) + ms * LOG10_2
 
 
 def log10sumexp2_pair(a, b):
     ms = max(a, b)
-    return np.log10(np.exp2(a - ms) + np.exp2(b - ms)) + ms * LOG10_2
+    return math_log10((2.0 ** (a - ms)) + (2.0 ** (b - ms))) + ms * LOG10_2
+
+def log2sumexp2_pair(a, b):
+    ms = max(a, b)
+    return math_log2((2.0 ** (a - ms)) + (2.0 ** (b - ms))) + ms
+
+def log2sumexp2_triple(a, b, c):
+    ms = max(a, b, c)
+    return math_log2((2.0 ** (a - ms)) + (2.0 ** (b - ms)) + (2.0 ** (c - ms))) + ms
 
 def log2sumexp2(s):
     values = tuple(s)
     if not values:
         return 0
     ms = max(values)
-    return np.log2(sum(np.exp2(value - ms) for value in values)) + ms
+    return math_log2(sum(2.0 ** (value - ms) for value in values)) + ms

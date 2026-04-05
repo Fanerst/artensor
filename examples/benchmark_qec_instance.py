@@ -33,7 +33,7 @@ def parse_qec_equation(path):
     inputs = lhs.split(",")
     output = rhs[0]
     labels = sorted(set("".join(inputs)))
-    tensor_bonds = {i: list(set(term)) for i, term in enumerate(inputs)}
+    tensor_bonds = {i: sorted(set(term)) for i, term in enumerate(inputs)}
     bond_dims = {label: 2 for label in labels}
     bond_dims[output] = 2 ** 8
     return tensor_bonds, bond_dims, output
@@ -112,6 +112,8 @@ def main():
     parser.add_argument("--alpha", type=float, default=64.0)
     parser.add_argument("--greedy-alpha", type=float, default=0.0)
     parser.add_argument("--greedy-strategy", default="min_dim")
+    parser.add_argument("--greedy-seed-start", type=int, default=None)
+    parser.add_argument("--greedy-seed-count", type=int, default=1)
     parser.add_argument("--slicing-repeat", type=int, default=8)
     parser.add_argument("--disable-slicing", action="store_true")
     parser.add_argument("--min-sc-before-slicing", type=float, default=None)
@@ -124,6 +126,8 @@ def main():
     parser.add_argument("--post-target-betas", type=int, default=0)
     parser.add_argument("--post-target-rounds", type=int, default=0)
     parser.add_argument("--slice-replace-rounds", type=int, default=0)
+    parser.add_argument("--slice-candidate-limit", type=int, default=4)
+    parser.add_argument("--replace-candidate-limit", type=int, default=4)
     args = parser.parse_args()
 
     run_start = time.perf_counter()
@@ -139,6 +143,8 @@ def main():
         alpha=args.alpha,
         greedy_alpha=args.greedy_alpha,
         greedy_strategy=args.greedy_strategy,
+        greedy_seed_start=args.greedy_seed_start,
+        greedy_seed_count=args.greedy_seed_count,
         disable_slicing=args.disable_slicing,
         min_sc_before_slicing=args.min_sc_before_slicing,
         max_slice_steps=args.max_slice_steps,
@@ -150,6 +156,8 @@ def main():
         post_target_betas=args.post_target_betas,
         post_target_rounds=args.post_target_rounds,
         slice_replace_rounds=args.slice_replace_rounds,
+        slice_candidate_limit=args.slice_candidate_limit,
+        replace_candidate_limit=args.replace_candidate_limit,
     )
 
     stage_start = time.perf_counter()
@@ -179,22 +187,50 @@ def main():
     greedy_order = GreedyOrderFinder(tensor_network)
 
     stage_start = time.perf_counter()
-    order, greedy_tc, greedy_sc = greedy_order(args.greedy_strategy, args.seed, alpha=args.greedy_alpha)
+    seed_start = args.seed if args.greedy_seed_start is None else args.greedy_seed_start
+    greedy_candidates = []
+    for offset in range(max(1, args.greedy_seed_count)):
+        greedy_seed = seed_start + offset
+        candidate_start = time.perf_counter()
+        order, greedy_tc, greedy_sc = greedy_order(
+            args.greedy_strategy,
+            greedy_seed,
+            alpha=args.greedy_alpha,
+        )
+        tree = ContractionTree(deepcopy(tensor_network), order, 0)
+        tc, sc, mc = tree.tree_complexity()
+        greedy_candidates.append(((sc, tc, mc, greedy_seed), order, tree, greedy_tc, greedy_sc, greedy_seed))
+        log_event(
+            "greedy_candidate_done",
+            elapsed_s=time.perf_counter() - candidate_start,
+            greedy_seed=greedy_seed,
+            greedy_tc=greedy_tc,
+            greedy_sc=greedy_sc,
+            tree_tc=tc,
+            tree_sc=sc,
+            tree_mc=mc,
+            order_len=len(order),
+            greedy_strategy=args.greedy_strategy,
+        )
+    _, order, tree, greedy_tc, greedy_sc, selected_greedy_seed = min(
+        greedy_candidates, key=lambda item: item[0]
+    )
+    tc, sc, mc = tree.tree_complexity()
     log_event(
         "greedy_done",
         elapsed_s=time.perf_counter() - stage_start,
         tc=greedy_tc,
         sc=greedy_sc,
+        tree_tc=tc,
+        tree_sc=sc,
+        tree_mc=mc,
         order_len=len(order),
         greedy_strategy=args.greedy_strategy,
+        selected_seed=selected_greedy_seed,
     )
-
-    stage_start = time.perf_counter()
-    tree = ContractionTree(deepcopy(tensor_network), order, 0)
-    tc, sc, mc = tree.tree_complexity()
     log_event(
         "tree_built",
-        elapsed_s=time.perf_counter() - stage_start,
+        elapsed_s=0.0,
         tc=tc,
         sc=sc,
         mc=mc,
@@ -308,7 +344,13 @@ def main():
             )
             break
         stage_start = time.perf_counter()
-        slicing_bond = select_ranked_slicing_bond(tree, sc, args.sc_target, args.alpha)
+        slicing_bond = select_ranked_slicing_bond(
+            tree,
+            sc,
+            args.sc_target,
+            args.alpha,
+            candidate_limit=args.slice_candidate_limit,
+        )
         tree.slicing(slicing_bond)
         refine_betas = betas[-min(3, len(betas)):]
         refine_iters = max(1, min(2, args.iters))
@@ -334,7 +376,12 @@ def main():
         reduce_slices_with_logging(tree, args.sc_target, args.alpha)
         if args.slice_replace_rounds > 0:
             for round_idx in range(args.slice_replace_rounds):
-                changed = replace_slices(tree, args.sc_target, args.alpha)
+                changed = replace_slices(
+                    tree,
+                    args.sc_target,
+                    args.alpha,
+                    candidate_limit=args.replace_candidate_limit,
+                )
                 log_event(
                     "slice_replace_done",
                     round=round_idx + 1,
@@ -356,7 +403,12 @@ def main():
                         tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=args.sc_target, alpha=args.alpha)
                 reduce_slices_with_logging(tree, args.sc_target, args.alpha)
                 if args.slice_replace_rounds > 0:
-                    replace_slices(tree, args.sc_target, args.alpha)
+                    replace_slices(
+                        tree,
+                        args.sc_target,
+                        args.alpha,
+                        candidate_limit=args.replace_candidate_limit,
+                    )
                     reduce_slices_with_logging(tree, args.sc_target, args.alpha)
                 tc, sc, mc = tree.tree_complexity()
                 candidate_key = post_target_key(tree, args.sc_target, args.alpha)

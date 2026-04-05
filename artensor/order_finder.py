@@ -217,7 +217,8 @@ def simulate_annealing(
         disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None,
         peak_rebuild_patience=3, peak_rebuild_size=5, peak_rebuild_vertex_limit=3,
         peak_rebuild_min_sc_delta=None, max_parallel_workers=None,
-        post_target_betas=0, post_target_rounds=0, slice_replace_rounds=0
+        post_target_betas=0, post_target_rounds=0, slice_replace_rounds=0,
+        slice_candidate_limit=4, replace_candidate_limit=4
     ):
     greedy_order = GreedyOrderFinder(tensor_network)
     # order, tc, sc = greedy_order('min_dim', seed)
@@ -253,7 +254,8 @@ def simulate_annealing(
             iters, betas, start_seed + i, slicing_repeat, alpha, update_mode,
             disable_slicing, min_sc_before_slicing, max_slice_steps, max_slices,
             peak_rebuild_patience, peak_rebuild_size, peak_rebuild_vertex_limit,
-            peak_rebuild_min_sc_delta, post_target_betas, post_target_rounds, slice_replace_rounds
+            peak_rebuild_min_sc_delta, post_target_betas, post_target_rounds, slice_replace_rounds,
+            slice_candidate_limit, replace_candidate_limit
         ) for i in range(trials)]
     if update_mode == "optimized" and trials == 1:
         results = [sa_trial(*args[0])]
@@ -280,7 +282,8 @@ def sa_trial(
         slicing_repeat=4, alpha=32.0, update_mode="optimized",
         disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None,
         peak_rebuild_patience=3, peak_rebuild_size=5, peak_rebuild_vertex_limit=3,
-        peak_rebuild_min_sc_delta=None, post_target_betas=0, post_target_rounds=0, slice_replace_rounds=0
+        peak_rebuild_min_sc_delta=None, post_target_betas=0, post_target_rounds=0, slice_replace_rounds=0,
+        slice_candidate_limit=4, replace_candidate_limit=4
     ):
     init_tc, init_sc, init_mc = init_result
     init_score = score_fn(init_tc, init_sc, init_mc, sc_target, alpha)
@@ -363,7 +366,9 @@ def sa_trial(
                 break
             if max_slices is not None and len(tree.tn.slicing_bonds) >= max_slices:
                 break
-            slicing_bond = select_ranked_slicing_bond(tree, current_sc, sc_target, alpha)
+            slicing_bond = select_ranked_slicing_bond(
+                tree, current_sc, sc_target, alpha, candidate_limit=slice_candidate_limit
+            )
             tree.slicing(slicing_bond)
             slice_steps += 1
             refine_betas = betas[-min(3, len(betas)):]
@@ -376,7 +381,9 @@ def sa_trial(
             reduce_slices(tree, sc_target, alpha)
             if slice_replace_rounds > 0:
                 for _ in range(slice_replace_rounds):
-                    if not replace_slices(tree, sc_target, alpha):
+                    if not replace_slices(
+                        tree, sc_target, alpha, candidate_limit=replace_candidate_limit
+                    ):
                         break
                     reduce_slices(tree, sc_target, alpha)
         if post_target_betas > 0 and tree.tn.slicing_bonds:
@@ -392,7 +399,9 @@ def sa_trial(
                         tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=sc_target, alpha=alpha)
                 reduce_slices(tree, sc_target, alpha)
                 if slice_replace_rounds > 0:
-                    replace_slices(tree, sc_target, alpha)
+                    replace_slices(
+                        tree, sc_target, alpha, candidate_limit=replace_candidate_limit
+                    )
                     reduce_slices(tree, sc_target, alpha)
                 candidate_key = post_target_key(tree, sc_target, alpha)
                 if candidate_key < best_post[0]:

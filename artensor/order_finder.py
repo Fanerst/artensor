@@ -45,7 +45,7 @@ def snapshot_tree(tree):
 
 def restore_tree(base_tensor_network, snapshot):
     order, slicing_bonds = snapshot
-    tensor_network = deepcopy(base_tensor_network)
+    tensor_network = base_tensor_network.clone()
     for bond in slicing_bonds:
         tensor_network.slicing(bond)
     return ContractionTree(tensor_network, order, 0)
@@ -112,7 +112,7 @@ def simulate_annealing(
     #     ) for i in range(trials)]
     init_tree = [
         ContractionTree(
-            deepcopy(tensor_network), 
+            tensor_network.clone(),
             greedy_order('min_dim', start_seed + i, alpha=greedy_alpha)[0], 
             0
         )
@@ -120,7 +120,7 @@ def simulate_annealing(
     ]
     args = [
         (
-            init_tree[i].copy(), sc_target, init_tree[i].tree_complexity(), 
+            init_tree[i], sc_target, init_tree[i].tree_complexity(), 
             iters, betas, start_seed + i, slicing_repeat, alpha, update_mode
         ) for i in range(trials)]
     if update_mode == "optimized" and trials == 1:
@@ -144,7 +144,7 @@ def sa_trial(
     ):
     init_tc, init_sc, init_mc = init_result
     init_score = score_fn(init_tc, init_sc, init_mc, sc_target, alpha)
-    base_tensor_network = deepcopy(tree.tn)
+    base_tensor_network = tree.tn.clone()
     if update_mode == "legacy":
         best_result = [(init_score, init_tc, init_sc, init_mc), tree.copy()]
     else:
@@ -170,11 +170,14 @@ def sa_trial(
             if result[0] < best_result[0][0]:
                 best_result = [result, tree.copy()] if update_mode == "legacy" else [result, snapshot_tree(tree)]
     
-    best_tree = best_result[1] if update_mode == "legacy" else restore_tree(base_tensor_network, best_result[1])
+    if update_mode == "legacy":
+        best_tree = best_result[1]
+    else:
+        best_tree = restore_tree(base_tensor_network, best_result[1])
     result = best_tree.tree_complexity()
     optimized_sc = result[1]
     if update_mode == "optimized":
-        tree = restore_tree(base_tensor_network, best_result[1])
+        tree = best_tree
         current_tc, current_sc, current_mc = tree.tree_complexity()
         while current_sc > sc_target:
             slicing_bond = select_ranked_slicing_bond(tree, current_sc, sc_target, alpha)
@@ -282,38 +285,42 @@ def determine_old_order(vertex, local_tree_leaves):
 
 def tree_update(vertex, tree, beta, rng, sc_target=30.0, alpha=32.0):
     """
-    Apply a lightweight local tree rotation update recursively.
+    Apply a lightweight local tree rotation update iteratively.
+    This follows Julia's TreeSA more closely by sampling one applicable local rule
+    per visited node instead of scoring every possible rule.
     """
     if vertex is None or not (vertex.left and vertex.right):
         return
 
-    local_updates = tree.iter_local_updates(vertex)
-    if local_updates:
-        candidate_moves = []
-        for side, branch, outer, first, second in local_updates:
-            tc_tree, sc_tree, mc_tree = local_tree_score(branch, vertex, (first, second, outer))
+    stack = [vertex]
+    while stack:
+        current = stack.pop()
+        if current is None or not (current.left and current.right):
+            continue
+        local_updates = tree.iter_local_updates(current)
+        if local_updates:
+            update_idx = 0 if len(local_updates) == 1 else rng.randint(len(local_updates))
+            side, branch, outer, first, second = local_updates[update_idx]
+            tc_tree, sc_tree, mc_tree = local_tree_score(branch, current, (first, second, outer))
             reference_score = score_fn(tc_tree, sc_tree, mc_tree, sc_target, alpha)
+            choice = rng.randint(2)
             if side == "left":
-                candidates = (
-                    candidate_local_tree_score(tree.tn, first, outer, second),
-                    candidate_local_tree_score(tree.tn, second, outer, first),
-                )
+                if choice == 0:
+                    tc_new, sc_new, mc_new = candidate_local_tree_score(tree.tn, first, outer, second)
+                else:
+                    tc_new, sc_new, mc_new = candidate_local_tree_score(tree.tn, second, outer, first)
             else:
-                candidates = (
-                    candidate_local_tree_score(tree.tn, outer, second, first),
-                    candidate_local_tree_score(tree.tn, outer, first, second),
-                )
-            for choice, (tc_new, sc_new, mc_new) in enumerate(candidates):
-                score_new = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
-                candidate_moves.append(
-                    (score_new - reference_score, side, branch, outer, first, second, choice)
-                )
-        delta_score, side, branch, outer, first, second, choice = candidate_moves[rng.choice(len(candidate_moves))]
-        if delta_score <= 0 or rng.rand() < np.exp(-beta * delta_score):
-            tree.apply_local_update(vertex, side, branch, outer, first, second, choice)
-
-    for next_vertex in (vertex.left, vertex.right):
-        tree_update(next_vertex, tree, beta, rng, sc_target, alpha)
+                if choice == 0:
+                    tc_new, sc_new, mc_new = candidate_local_tree_score(tree.tn, outer, second, first)
+                else:
+                    tc_new, sc_new, mc_new = candidate_local_tree_score(tree.tn, outer, first, second)
+            delta_score = score_fn(tc_new, sc_new, mc_new, sc_target, alpha) - reference_score
+            if delta_score <= 0 or rng.rand() < np.exp(-beta * delta_score):
+                tree.apply_local_update(current, side, branch, outer, first, second, choice)
+        if current.right is not None:
+            stack.append(current.right)
+        if current.left is not None:
+            stack.append(current.left)
 
 
 def tree_update_legacy(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha=32.0):
@@ -372,7 +379,7 @@ def find_order(
     # ctree = ContractionTree(deepcopy(tensor_network), order, seed)
     sys.setrecursionlimit(16385)
     order_slicing, slicing_bonds = simulate_annealing(
-        deepcopy(tensor_network), **simulated_annnealing_args
+        tensor_network, **simulated_annnealing_args
     )
 
     for bond in list(slicing_bonds):

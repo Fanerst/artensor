@@ -29,28 +29,62 @@ class ContractionVertex:
         self.rep_tensor = -1
         self.update_info(contain_tensors, tn, left, right)
 
+    @property
+    def contain_bonds(self):
+        if self._contain_bonds is None:
+            self._contain_bonds = set(self._tn.mask_to_bonds(self.contain_bonds_mask))
+        return self._contain_bonds
+
+    @property
+    def all_bonds(self):
+        if self._all_bonds is None:
+            self._all_bonds = set(self._tn.mask_to_bonds(self.all_bonds_mask))
+        return self._all_bonds
+
+    @property
+    def contract_bonds(self):
+        if self._contract_bonds is None:
+            self._contract_bonds = set(self._tn.mask_to_bonds(self.contract_bonds_mask))
+        return self._contract_bonds
+
     def update_info(self, contain_tensors, tn, left, right):
         """
         Calculate and store contraction information
         """
         self.contain_tensors = contain_tensors
+        self._tn = tn
         # self.involved_bonds = left.involved_bonds | right.involved_bonds if left and right else set().union(*[tn.tensor_bonds[tensor_id] for tensor_id in contain_tensors])
         self.left = left
         self.right = right
         if left and right:
             self.contain_tensor_mask = left.contain_tensor_mask | right.contain_tensor_mask
-            self.tc, self.sc, self.multiconfig_factor, self.contain_bonds, self.mc, self.contract_bonds, self.all_bonds = \
-                get_tc_sc_contraction(tn, left, right)
+            (
+                self.tc,
+                self.sc,
+                self.multiconfig_factor,
+                self.mc,
+                self.contain_bonds_mask,
+                self.contract_bonds_mask,
+                self.all_bonds_mask,
+            ) = get_tc_sc_contraction(tn, left, right)
+            self._contain_bonds = None
+            self._contract_bonds = None
+            self._all_bonds = None
         else:
             tensor_id = list(contain_tensors)[0]
             self.contain_tensor_mask = tn.tensor_bitmasks[tensor_id]
-            self.tc, self.sc, self.multiconfig_factor, self.contain_bonds, self.mc = \
-                get_tc_sc_inner(tn, contain_tensors)
-            self.all_bonds = self.contain_bonds
-            self.contract_bonds = set()
-        self.contain_bonds_mask = tn.bonds_to_mask(self.contain_bonds)
-        self.all_bonds_mask = tn.bonds_to_mask(self.all_bonds)
-        self.contract_bonds_mask = tn.bonds_to_mask(self.contract_bonds)
+            (
+                self.tc,
+                self.sc,
+                self.multiconfig_factor,
+                self.mc,
+                self.contain_bonds_mask,
+            ) = get_tc_sc_inner(tn, contain_tensors)
+            self._contain_bonds = None
+            self.all_bonds_mask = self.contain_bonds_mask
+            self._all_bonds = None
+            self.contract_bonds_mask = 0
+            self._contract_bonds = set()
 
     def is_leaf(self):
         if self.left and self.right:
@@ -76,9 +110,9 @@ def get_tc_sc_inner(tn:AbstractTensorNetwork, part):
     """
     assert len(part) == 1
     tensor_id = list(part)[0]
-    bonds1 = set(tn.tensor_bonds[tensor_id])# bonds_out(tn.tensor_bonds, part)
+    bonds_mask = tn.tensor_bond_masks[tensor_id]
     multiconfig_factor = min(tn.log2_max_bitstring, final_qubits_num(tn.num_fq, part))
-    return 0.0, tn.sum_log2_dims_mask(tn.tensor_bond_masks[tensor_id]) + multiconfig_factor, multiconfig_factor, bonds1, 0.0
+    return 0.0, tn.sum_log2_dims_mask(bonds_mask) + multiconfig_factor, multiconfig_factor, 0.0, bonds_mask
 
 
 def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, right:ContractionVertex):
@@ -86,15 +120,27 @@ def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, righ
     Calculating complexity of contracting tensors in left and right
     return tc, sc, resulting_bonds and mc
     """
-    _, tc, sc, multiconfig_factor, result_bonds, mc, contract_bonds, all_bonds = merge_vertex_info(tn, left, right)
-    return tc, sc, multiconfig_factor, result_bonds, mc, contract_bonds, all_bonds
+    (
+        tc,
+        sc,
+        multiconfig_factor,
+        result_bonds_mask,
+        mc,
+        contract_bonds_mask,
+        all_bonds_mask,
+    ) = merge_vertex_info_masks(tn, left, right)
+    return (
+        tc,
+        sc,
+        multiconfig_factor,
+        mc,
+        result_bonds_mask,
+        contract_bonds_mask,
+        all_bonds_mask,
+    )
 
 
-def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
-    contracted_tensors = left.contain_tensors | right.contain_tensors
-    contracted_tensor_mask = left.contain_tensor_mask | right.contain_tensor_mask
-    all_bonds_mask = left.contain_bonds_mask | right.contain_bonds_mask
-    common_bonds_mask = left.contain_bonds_mask & right.contain_bonds_mask
+def _contract_bonds_mask(tn:AbstractTensorNetwork, common_bonds_mask, contracted_tensor_mask):
     contract_bonds_mask = 0
     remaining_common = common_bonds_mask
     while remaining_common:
@@ -103,10 +149,15 @@ def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
         if bond not in tn.open_bonds and tn.bond_tensor_masks[bond] & contracted_tensor_mask == tn.bond_tensor_masks[bond]:
             contract_bonds_mask |= lowest_bit
         remaining_common ^= lowest_bit
+    return contract_bonds_mask
+
+
+def merge_vertex_info_masks(tn:AbstractTensorNetwork, left, right):
+    contracted_tensor_mask = left.contain_tensor_mask | right.contain_tensor_mask
+    all_bonds_mask = left.contain_bonds_mask | right.contain_bonds_mask
+    common_bonds_mask = left.contain_bonds_mask & right.contain_bonds_mask
+    contract_bonds_mask = _contract_bonds_mask(tn, common_bonds_mask, contracted_tensor_mask)
     result_bonds_mask = all_bonds_mask & ~contract_bonds_mask
-    all_bonds = set(tn.mask_to_bonds(all_bonds_mask))
-    result_bonds = set(tn.mask_to_bonds(result_bonds_mask))
-    contract_bonds = set(tn.mask_to_bonds(contract_bonds_mask))
     combined_multiconfig_factor = left.multiconfig_factor + right.multiconfig_factor
     multiconfig_factor = min(tn.log2_max_bitstring, combined_multiconfig_factor)
 
@@ -123,7 +174,23 @@ def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
         ])
     else:
         mc = log2sumexp2([left.sc, right.sc, sc])
-    return contracted_tensors, tc, sc, multiconfig_factor, result_bonds, mc, contract_bonds, all_bonds
+    return tc, sc, multiconfig_factor, result_bonds_mask, mc, contract_bonds_mask, all_bonds_mask
+
+
+def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
+    (
+        tc,
+        sc,
+        multiconfig_factor,
+        result_bonds_mask,
+        mc,
+        contract_bonds_mask,
+        all_bonds_mask,
+    ) = merge_vertex_info_masks(tn, left, right)
+    result_bonds = set(tn.mask_to_bonds(result_bonds_mask))
+    contract_bonds = set(tn.mask_to_bonds(contract_bonds_mask))
+    all_bonds = set(tn.mask_to_bonds(all_bonds_mask))
+    return left.contain_tensors | right.contain_tensors, tc, sc, multiconfig_factor, result_bonds, mc, contract_bonds, all_bonds
 
 
 def local_tree_score(branch, root, leaves):
@@ -134,20 +201,24 @@ def local_tree_score(branch, root, leaves):
 
 
 def candidate_local_tree_score(tn, first, second, third):
-    mid_tensors, mid_tc, mid_sc, mid_multiconfig_factor, mid_bonds, mid_mc, mid_contract_bonds, mid_all_bonds = \
-        merge_vertex_info(tn, first, second)
+    (
+        mid_tc,
+        mid_sc,
+        mid_multiconfig_factor,
+        mid_bonds_mask,
+        mid_mc,
+        mid_contract_bonds_mask,
+        mid_all_bonds_mask,
+    ) = merge_vertex_info_masks(tn, first, second)
     mid = SimpleNamespace(
-        contain_tensors=mid_tensors,
         contain_tensor_mask=first.contain_tensor_mask | second.contain_tensor_mask,
-        contain_bonds=mid_bonds,
-        contain_bonds_mask=tn.bonds_to_mask(mid_bonds),
+        contain_bonds_mask=mid_bonds_mask,
         multiconfig_factor=mid_multiconfig_factor,
         sc=mid_sc,
-        all_bonds=mid_all_bonds,
-        all_bonds_mask=tn.bonds_to_mask(mid_all_bonds),
-        contract_bonds=mid_contract_bonds
+        all_bonds_mask=mid_all_bonds_mask,
+        contract_bonds_mask=mid_contract_bonds_mask,
     )
-    _, root_tc, root_sc, _, _, root_mc, _, _ = merge_vertex_info(tn, mid, third)
+    root_tc, root_sc, _, _, root_mc, _, _ = merge_vertex_info_masks(tn, mid, third)
     tc = log10sumexp2_pair(mid_tc, root_tc)
     sc = max(first.sc, second.sc, third.sc, mid_sc, root_sc)
     mc = log10sumexp2_pair(mid_mc, root_mc)
@@ -531,11 +602,22 @@ class ContractionTree:
         """
         Calculate the contractin complexity of the contraction tree
         """
+        if tree is None and root is None:
+            tcs = []
+            sc = 0.0
+            mcs = []
+            for vertex in self.tree.values():
+                if vertex.sc > sc:
+                    sc = vertex.sc
+                if vertex.left and vertex.right:
+                    tcs.append(vertex.tc)
+                    mcs.append(vertex.mc)
+            return log10sumexp2(tcs), sc, log10sumexp2(mcs)
+
         if tree is None:
             tree = self.tree.values()
         if root is None:
             root = self.tree[self.all_tensors]
-        # assert root == tree[-1]
         current_vertices = [root]
         tcs, scs = [], []
         mcs = []
@@ -544,27 +626,17 @@ class ContractionTree:
             for vertex in current_vertices:
                 left, right = vertex.left, vertex.right
                 if left in tree and right in tree:
-                    # factor = min(log2(self.tn.max_bitstring), final_qubits_num(self.tn.num_fq, vertex.contain_tensors))
                     if left and right:
                         next_vertices += [left, right]
                         scs.append(vertex.sc)
                         tcs.append(vertex.tc)
                         mcs.append(vertex.mc)
-                        # print(vertex.contain_tensors, vertex.tc, vertex.sc)
                     else:
                         scs.append(vertex.sc)
-                        # print(vertex.contain_tensors, vertex.sc)
                 else:
-                    # factor = min(log2(self.tn.max_bitstring), final_qubits_num(self.tn.num_fq, vertex.contain_tensors))
                     scs.append(vertex.sc)
             current_vertices = next_vertices
-        # print('tree complexity:', tcs, scs)
-        tc = log10sumexp2(tcs)
-        sc = max(scs)
-        mc = log10sumexp2(mcs)
-        # score = score_fn(tc, sc, mc)
-        # print('contraction tree result:', tc, sc, score)
-        return tc, sc, mc
+        return log10sumexp2(tcs), max(scs), log10sumexp2(mcs)
 
     def tree_complexity_new_order(self, tree_leaves, new_order):
         """

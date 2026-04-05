@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from artensor.order_finder import (
     compress_bond_labels,
+    optimize_peak_subtree,
     reduce_slices,
     restore_tree,
     score_fn,
@@ -113,6 +114,10 @@ def main():
     parser.add_argument("--min-sc-before-slicing", type=float, default=None)
     parser.add_argument("--max-slice-steps", type=int, default=None)
     parser.add_argument("--max-slices", type=int, default=None)
+    parser.add_argument("--peak-rebuild-patience", type=int, default=3)
+    parser.add_argument("--peak-rebuild-size", type=int, default=5)
+    parser.add_argument("--peak-rebuild-vertex-limit", type=int, default=3)
+    parser.add_argument("--peak-rebuild-min-sc-delta", type=float, default=8.0)
     args = parser.parse_args()
 
     run_start = time.perf_counter()
@@ -131,6 +136,10 @@ def main():
         min_sc_before_slicing=args.min_sc_before_slicing,
         max_slice_steps=args.max_slice_steps,
         max_slices=args.max_slices,
+        peak_rebuild_patience=args.peak_rebuild_patience,
+        peak_rebuild_size=args.peak_rebuild_size,
+        peak_rebuild_vertex_limit=args.peak_rebuild_vertex_limit,
+        peak_rebuild_min_sc_delta=args.peak_rebuild_min_sc_delta,
     )
 
     stage_start = time.perf_counter()
@@ -184,14 +193,49 @@ def main():
     base_tensor_network = deepcopy(tree.tn)
     best_result = [(score_fn(tc, sc, mc, args.sc_target, args.alpha), tc, sc, mc), snapshot_tree(tree)]
 
+    plateau_rounds = 0
+    last_rebuild_sc = sc
     for beta in betas:
         stage_start = time.perf_counter()
         for _ in range(args.iters):
             tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=args.sc_target, alpha=args.alpha)
         tc, sc, mc = tree.tree_complexity()
         result = (score_fn(tc, sc, mc, args.sc_target, args.alpha), tc, sc, mc)
-        if result[0] < best_result[0][0]:
+        improved = result[0] < best_result[0][0]
+        if improved:
             best_result = [result, snapshot_tree(tree)]
+        if args.peak_rebuild_min_sc_delta is None:
+            plateau_rounds = 0 if improved else plateau_rounds + 1
+        else:
+            if last_rebuild_sc - sc >= args.peak_rebuild_min_sc_delta:
+                plateau_rounds = 0
+                last_rebuild_sc = sc
+            else:
+                plateau_rounds += 1
+        if args.peak_rebuild_patience is not None and plateau_rounds >= args.peak_rebuild_patience:
+            rebuild_start = time.perf_counter()
+            changed, rebuild_result = optimize_peak_subtree(
+                tree,
+                args.sc_target,
+                args.alpha,
+                subtree_size=args.peak_rebuild_size,
+                vertex_limit=args.peak_rebuild_vertex_limit,
+            )
+            plateau_rounds = 0
+            tc, sc, mc = tree.tree_complexity()
+            last_rebuild_sc = sc
+            result = (score_fn(tc, sc, mc, args.sc_target, args.alpha), tc, sc, mc)
+            if result[0] < best_result[0][0]:
+                best_result = [result, snapshot_tree(tree)]
+            log_event(
+                "peak_rebuild_done",
+                elapsed_s=time.perf_counter() - rebuild_start,
+                changed=changed,
+                tc=tc,
+                sc=sc,
+                mc=mc,
+                best_score=best_result[0][0],
+            )
         log_event(
             "anneal_beta_done",
             beta=float(beta),

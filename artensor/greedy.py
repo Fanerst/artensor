@@ -368,11 +368,12 @@ class GreedyOrderFinder:
         loss_key = self._loss_key(sc, left_sc, right_sc, self.greedy_alpha)
         version = self.pair_versions.get((a, b), 0) + 1
         self.pair_versions[(a, b)] = version
-        heapq.heappush(self.pair_heap, (loss_key, sc, tc, a, b, version))
+        tie_break = self.rng.random_sample() if self.greedy_noise > 0 else 0.0
+        heapq.heappush(self.pair_heap, (loss_key, sc, tc, tie_break, a, b, version))
 
     def _pop_incidence_pair(self):
         while self.pair_heap:
-            _, _, _, i, j, version = heapq.heappop(self.pair_heap)
+            _, _, _, _, i, j, version = heapq.heappop(self.pair_heap)
             if not (self.active[i] and self.active[j]):
                 continue
             if self.pair_versions.get((i, j)) != version:
@@ -411,6 +412,7 @@ class GreedyOrderFinder:
         return tc, sc
 
     def greedy_order_incidence(self, seed):
+        self.rng = np.random.RandomState(seed)
         n = len(self.tn.tensor_bonds)
         self.active = [True] * n
         self.vertex_edges = {
@@ -458,6 +460,7 @@ class GreedyOrderFinder:
         """
         self.strategy = strategy
         self.greedy_alpha = alpha
+        self.greedy_noise = 1e-9
         if strategy == 'min_dim':
             return self.greedy_order_incidence(seed)
 

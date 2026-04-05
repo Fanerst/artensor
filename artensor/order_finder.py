@@ -3,6 +3,7 @@ import multiprocessing as mp
 import numpy as np
 import sys
 from copy import deepcopy
+from functools import lru_cache
 from .greedy import GreedyOrderFinder
 from .contraction_tree import ContractionTree, candidate_local_tree_score, local_tree_score
 from .tensor_network import AbstractTensorNetwork
@@ -107,10 +108,74 @@ def should_start_slicing(current_sc, sc_target, min_sc_before_slicing=None, disa
     return current_sc <= min_sc_before_slicing
 
 
+@lru_cache(maxsize=None)
+def enumerate_contraction_orders(active):
+    if len(active) == 1:
+        return ((),)
+    orders = []
+    active = tuple(active)
+    for pos_i in range(len(active) - 1):
+        for pos_j in range(pos_i + 1, len(active)):
+            i = active[pos_i]
+            j = active[pos_j]
+            next_active = list(active)
+            next_active.pop(pos_j)
+            for suffix in enumerate_contraction_orders(tuple(next_active)):
+                orders.append(((i, j),) + suffix)
+    return tuple(orders)
+
+
+def optimize_peak_subtree(tree, sc_target, alpha, subtree_size=5, vertex_limit=3):
+    base_tc, base_sc, base_mc = tree.tree_complexity()
+    base_score = score_fn(base_tc, base_sc, base_mc, sc_target, alpha)
+    peak_vertices = sorted(
+        (
+            vertex for vertex in tree.tree.values()
+            if vertex.left and vertex.right
+        ),
+        key=lambda vertex: (-vertex.sc, -len(vertex.contain_tensors)),
+    )
+    best_candidate = None
+    for root in peak_vertices[:vertex_limit]:
+        tree_leaves, local_tree = tree.spanning_tree(root, size=subtree_size)
+        num_leaves = len(tree_leaves)
+        if num_leaves <= 2:
+            continue
+        reference_tc, reference_sc, reference_mc = tree.tree_complexity(local_tree, root)
+        reference_score = score_fn(reference_tc, reference_sc, reference_mc, sc_target, alpha)
+        candidate_orders = enumerate_contraction_orders(tuple(range(num_leaves)))
+        local_best = None
+        for order in candidate_orders:
+            tc_new, sc_new, mc_new = tree.tree_complexity_new_order(tree_leaves, order)
+            candidate_score = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
+            if local_best is None or candidate_score < local_best[0]:
+                local_best = (candidate_score, order, root.contain_tensors)
+        if local_best is None or local_best[0] >= reference_score:
+            continue
+        if best_candidate is None or local_best[0] < best_candidate[0]:
+            best_candidate = local_best
+    if best_candidate is None:
+        return False, None
+    _, order, root_key = best_candidate
+    candidate_tree = tree.copy()
+    root = candidate_tree.tree[root_key]
+    tree_leaves, local_tree = candidate_tree.spanning_tree(root, size=subtree_size)
+    candidate_tree.apply_order(list(order), list(tree_leaves), local_tree, root)
+    tc_new, sc_new, mc_new = candidate_tree.tree_complexity()
+    candidate_score = score_fn(tc_new, sc_new, mc_new, sc_target, alpha)
+    if candidate_score >= base_score:
+        return False, (base_tc, base_sc, base_mc)
+    tree.tree = candidate_tree.tree
+    tree.order = candidate_tree.order
+    return True, (tc_new, sc_new, mc_new)
+
+
 def simulate_annealing(
         tensor_network, sc_target=-1, trials=10, iters=50, betas=np.linspace(0.1, 10, 100), 
         slicing_repeat=4, start_seed=0, alpha=32.0, update_mode="optimized", greedy_alpha=0.0,
-        disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None
+        disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None,
+        peak_rebuild_patience=3, peak_rebuild_size=5, peak_rebuild_vertex_limit=3,
+        peak_rebuild_min_sc_delta=None, max_parallel_workers=None
     ):
     greedy_order = GreedyOrderFinder(tensor_network)
     # order, tc, sc = greedy_order('min_dim', seed)
@@ -121,10 +186,21 @@ def simulate_annealing(
     #         tree.copy(), sc_target, init_result, iters, betas, start_seed + i, 
     #         slicing_repeat, alpha
     #     ) for i in range(trials)]
+    greedy_alpha_options = []
+    for value in (
+        greedy_alpha,
+        0.0,
+        max(0.03, greedy_alpha * 0.5),
+        max(0.1, greedy_alpha),
+        max(0.3, greedy_alpha * 2.0),
+    ):
+        if value not in greedy_alpha_options:
+            greedy_alpha_options.append(value)
+
     init_tree = [
         ContractionTree(
             tensor_network.clone(),
-            greedy_order('min_dim', start_seed + i, alpha=greedy_alpha)[0], 
+            greedy_order('min_dim', start_seed + i, alpha=greedy_alpha_options[i % len(greedy_alpha_options)])[0], 
             0
         )
         for i in range(trials)
@@ -133,12 +209,19 @@ def simulate_annealing(
         (
             init_tree[i], sc_target, init_tree[i].tree_complexity(), 
             iters, betas, start_seed + i, slicing_repeat, alpha, update_mode,
-            disable_slicing, min_sc_before_slicing, max_slice_steps, max_slices
+            disable_slicing, min_sc_before_slicing, max_slice_steps, max_slices,
+            peak_rebuild_patience, peak_rebuild_size, peak_rebuild_vertex_limit,
+            peak_rebuild_min_sc_delta
         ) for i in range(trials)]
     if update_mode == "optimized" and trials == 1:
         results = [sa_trial(*args[0])]
     else:
-        p = mp.Pool(trials)
+        worker_count = trials
+        if max_parallel_workers is not None:
+            worker_count = min(worker_count, max_parallel_workers)
+        else:
+            worker_count = min(worker_count, mp.cpu_count())
+        p = mp.Pool(worker_count)
         results = p.starmap(sa_trial, args)
         p.close()
     results_slicing = [
@@ -153,7 +236,9 @@ def simulate_annealing(
 def sa_trial(
         tree, sc_target, init_result, iters, betas, seed, 
         slicing_repeat=4, alpha=32.0, update_mode="optimized",
-        disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None
+        disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None,
+        peak_rebuild_patience=3, peak_rebuild_size=5, peak_rebuild_vertex_limit=3,
+        peak_rebuild_min_sc_delta=None
     ):
     init_tc, init_sc, init_mc = init_result
     init_score = score_fn(init_tc, init_sc, init_mc, sc_target, alpha)
@@ -164,6 +249,8 @@ def sa_trial(
         best_result = [(init_score, init_tc, init_sc, init_mc), snapshot_tree(tree)]
     rng = np.random.RandomState(seed)
     checkpoint_interval = 1 if update_mode == "legacy" else 10
+    plateau_rounds = 0
+    last_rebuild_sc = init_sc
     for beta in betas:
         for iter in range(iters):
             if update_mode == "legacy":
@@ -180,8 +267,39 @@ def sa_trial(
                 score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target, alpha), 
                 tc_tmp, sc_tmp, mc_tmp
             )
-            if result[0] < best_result[0][0]:
+            improved = result[0] < best_result[0][0]
+            if improved:
                 best_result = [result, tree.copy()] if update_mode == "legacy" else [result, snapshot_tree(tree)]
+            if peak_rebuild_min_sc_delta is None:
+                plateau_rounds = 0 if improved else plateau_rounds + 1
+            else:
+                if last_rebuild_sc - sc_tmp >= peak_rebuild_min_sc_delta:
+                    plateau_rounds = 0
+                    last_rebuild_sc = sc_tmp
+                else:
+                    plateau_rounds += 1
+            if (
+                update_mode == "optimized"
+                and peak_rebuild_patience is not None
+                and plateau_rounds >= peak_rebuild_patience
+            ):
+                changed, rebuild_result = optimize_peak_subtree(
+                    tree,
+                    sc_target,
+                    alpha,
+                    subtree_size=peak_rebuild_size,
+                    vertex_limit=peak_rebuild_vertex_limit,
+                )
+                plateau_rounds = 0
+                last_rebuild_sc = tree.tree_complexity()[1]
+                if changed:
+                    tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
+                    result = (
+                        score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target, alpha),
+                        tc_tmp, sc_tmp, mc_tmp,
+                    )
+                    if result[0] < best_result[0][0]:
+                        best_result = (result, snapshot_tree(tree))
     
     if update_mode == "legacy":
         best_tree = best_result[1]

@@ -35,6 +35,18 @@ class GreedyOrderFinder:
             return (0, penalty + log2(1 - 2 ** (out_sc - penalty)))
         return (1, out_sc + log2(1 - 2 ** (penalty - out_sc)))
 
+    def _incidence_priority(self, sc, tc, left_sc, right_sc):
+        if self.strategy == 'paper_balanced':
+            return (sc - min(left_sc, right_sc), sc, tc)
+        if self.strategy == 'paper_skewed':
+            return (sc - max(left_sc, right_sc), sc, tc)
+        if self.strategy == 'paper_tc':
+            return (tc, sc, max(left_sc, right_sc))
+        if self.strategy == 'paper_hybrid':
+            return (sc - min(left_sc, right_sc), max(left_sc, right_sc), tc)
+        loss_key = self._loss_key(sc, left_sc, right_sc, self.greedy_alpha)
+        return (loss_key, sc, tc)
+
     def _construct_pair_info(self):
         """
         Construct the pair contraction info
@@ -365,15 +377,15 @@ class GreedyOrderFinder:
         tc = d12 + d01 + d02 + d012
         left_sc = d01 + d12 + d012
         right_sc = d02 + d12 + d012
-        loss_key = self._loss_key(sc, left_sc, right_sc, self.greedy_alpha)
+        priority = self._incidence_priority(sc, tc, left_sc, right_sc)
         version = self.pair_versions.get((a, b), 0) + 1
         self.pair_versions[(a, b)] = version
         tie_break = self.rng.random_sample() if self.greedy_noise > 0 else 0.0
-        heapq.heappush(self.pair_heap, (loss_key, sc, tc, tie_break, a, b, version))
+        heapq.heappush(self.pair_heap, (*priority, tie_break, a, b, version))
 
     def _pop_incidence_pair(self):
         while self.pair_heap:
-            _, _, _, _, i, j, version = heapq.heappop(self.pair_heap)
+            *_, i, j, version = heapq.heappop(self.pair_heap)
             if not (self.active[i] and self.active[j]):
                 continue
             if self.pair_versions.get((i, j)) != version:
@@ -461,7 +473,7 @@ class GreedyOrderFinder:
         self.strategy = strategy
         self.greedy_alpha = alpha
         self.greedy_noise = 1e-9
-        if strategy == 'min_dim':
+        if strategy in {'min_dim', 'paper_balanced', 'paper_skewed', 'paper_tc', 'paper_hybrid'}:
             return self.greedy_order_incidence(seed)
 
         self.contain_tensors = [set([i]) for i in range(len(self.tn.tensor_bonds))]

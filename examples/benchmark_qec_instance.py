@@ -15,6 +15,7 @@ from artensor.order_finder import (
     restore_tree,
     score_fn,
     select_ranked_slicing_bond,
+    should_start_slicing,
     snapshot_tree,
     tree_update,
 )
@@ -108,6 +109,10 @@ def main():
     parser.add_argument("--alpha", type=float, default=64.0)
     parser.add_argument("--greedy-alpha", type=float, default=0.0)
     parser.add_argument("--slicing-repeat", type=int, default=8)
+    parser.add_argument("--disable-slicing", action="store_true")
+    parser.add_argument("--min-sc-before-slicing", type=float, default=None)
+    parser.add_argument("--max-slice-steps", type=int, default=None)
+    parser.add_argument("--max-slices", type=int, default=None)
     args = parser.parse_args()
 
     run_start = time.perf_counter()
@@ -122,6 +127,10 @@ def main():
         beta_steps=args.beta_steps,
         alpha=args.alpha,
         greedy_alpha=args.greedy_alpha,
+        disable_slicing=args.disable_slicing,
+        min_sc_before_slicing=args.min_sc_before_slicing,
+        max_slice_steps=args.max_slice_steps,
+        max_slices=args.max_slices,
     )
 
     stage_start = time.perf_counter()
@@ -205,7 +214,44 @@ def main():
     )
 
     slicing_step = 0
-    while sc > args.sc_target:
+    allow_slicing = should_start_slicing(
+        sc,
+        args.sc_target,
+        min_sc_before_slicing=args.min_sc_before_slicing,
+        disable_slicing=args.disable_slicing,
+    )
+    if not allow_slicing and sc > args.sc_target:
+        log_event(
+            "slicing_skipped",
+            reason="disabled" if args.disable_slicing else "above_min_sc_before_slicing",
+            tc=tc,
+            sc=sc,
+            mc=mc,
+            min_sc_before_slicing=args.min_sc_before_slicing,
+        )
+    while allow_slicing and sc > args.sc_target:
+        if args.max_slice_steps is not None and slicing_step >= args.max_slice_steps:
+            log_event(
+                "slice_limit_reached",
+                limit_type="max_slice_steps",
+                limit=args.max_slice_steps,
+                tc=tc,
+                sc=sc,
+                mc=mc,
+                num_slices=len(tree.tn.slicing_bonds),
+            )
+            break
+        if args.max_slices is not None and len(tree.tn.slicing_bonds) >= args.max_slices:
+            log_event(
+                "slice_limit_reached",
+                limit_type="max_slices",
+                limit=args.max_slices,
+                tc=tc,
+                sc=sc,
+                mc=mc,
+                num_slices=len(tree.tn.slicing_bonds),
+            )
+            break
         stage_start = time.perf_counter()
         slicing_bond = select_ranked_slicing_bond(tree, sc, args.sc_target, args.alpha)
         tree.slicing(slicing_bond)
@@ -229,7 +275,8 @@ def main():
 
     stage_start = time.perf_counter()
     before_reduce = len(tree.tn.slicing_bonds)
-    reduce_slices_with_logging(tree, args.sc_target, args.alpha)
+    if before_reduce:
+        reduce_slices_with_logging(tree, args.sc_target, args.alpha)
     tc, sc, mc = tree.tree_complexity()
     slicing_bonds = {int_to_bond[bond]: dim for bond, dim in tree.tn.slicing_bonds.items()}
     log_event(

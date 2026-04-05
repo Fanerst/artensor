@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from artensor.order_finder import (
     compress_bond_labels,
     optimize_peak_subtree,
+    post_target_key,
+    replace_slices,
     reduce_slices,
     restore_tree,
     score_fn,
@@ -119,6 +121,9 @@ def main():
     parser.add_argument("--peak-rebuild-size", type=int, default=5)
     parser.add_argument("--peak-rebuild-vertex-limit", type=int, default=3)
     parser.add_argument("--peak-rebuild-min-sc-delta", type=float, default=8.0)
+    parser.add_argument("--post-target-betas", type=int, default=0)
+    parser.add_argument("--post-target-rounds", type=int, default=0)
+    parser.add_argument("--slice-replace-rounds", type=int, default=0)
     args = parser.parse_args()
 
     run_start = time.perf_counter()
@@ -142,6 +147,9 @@ def main():
         peak_rebuild_size=args.peak_rebuild_size,
         peak_rebuild_vertex_limit=args.peak_rebuild_vertex_limit,
         peak_rebuild_min_sc_delta=args.peak_rebuild_min_sc_delta,
+        post_target_betas=args.post_target_betas,
+        post_target_rounds=args.post_target_rounds,
+        slice_replace_rounds=args.slice_replace_rounds,
     )
 
     stage_start = time.perf_counter()
@@ -324,6 +332,47 @@ def main():
     before_reduce = len(tree.tn.slicing_bonds)
     if before_reduce:
         reduce_slices_with_logging(tree, args.sc_target, args.alpha)
+        if args.slice_replace_rounds > 0:
+            for round_idx in range(args.slice_replace_rounds):
+                changed = replace_slices(tree, args.sc_target, args.alpha)
+                log_event(
+                    "slice_replace_done",
+                    round=round_idx + 1,
+                    changed=changed,
+                    remaining_slices=len(tree.tn.slicing_bonds),
+                )
+                if not changed:
+                    break
+                reduce_slices_with_logging(tree, args.sc_target, args.alpha)
+        if args.post_target_betas > 0:
+            refine_betas = betas[-min(args.post_target_betas, len(betas)):]
+            refine_rounds = max(1, args.post_target_rounds)
+            best_post_key = post_target_key(tree, args.sc_target, args.alpha)
+            best_post_snapshot = snapshot_tree(tree)
+            for round_idx in range(refine_rounds):
+                round_start = time.perf_counter()
+                for beta in refine_betas:
+                    for _ in range(max(1, min(2, args.iters))):
+                        tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=args.sc_target, alpha=args.alpha)
+                reduce_slices_with_logging(tree, args.sc_target, args.alpha)
+                if args.slice_replace_rounds > 0:
+                    replace_slices(tree, args.sc_target, args.alpha)
+                    reduce_slices_with_logging(tree, args.sc_target, args.alpha)
+                tc, sc, mc = tree.tree_complexity()
+                candidate_key = post_target_key(tree, args.sc_target, args.alpha)
+                if candidate_key < best_post_key:
+                    best_post_key = candidate_key
+                    best_post_snapshot = snapshot_tree(tree)
+                log_event(
+                    "post_target_round_done",
+                    round=round_idx + 1,
+                    elapsed_s=time.perf_counter() - round_start,
+                    tc=tc,
+                    sc=sc,
+                    mc=mc,
+                    num_slices=len(tree.tn.slicing_bonds),
+                )
+            tree = restore_tree(base_tensor_network, best_post_snapshot)
     tc, sc, mc = tree.tree_complexity()
     slicing_bonds = {int_to_bond[bond]: dim for bond, dim in tree.tn.slicing_bonds.items()}
     log_event(

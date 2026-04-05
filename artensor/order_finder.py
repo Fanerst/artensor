@@ -81,6 +81,46 @@ def reduce_slices(tree, sc_target, alpha):
     return tree
 
 
+def replace_slices(tree, sc_target, alpha, candidate_limit=4):
+    improved = False
+    while tree.tn.slicing_bonds:
+        current_tc, current_sc, current_mc = tree.tree_complexity()
+        current_score = score_fn(current_tc, current_sc, current_mc, sc_target, alpha)
+        ranked = tree.ranked_slicing_bonds(current_sc, limit=candidate_limit)
+        best_move = None
+        for remove_bond in list(tree.tn.slicing_bonds.keys()):
+            tree.add_bond(remove_bond)
+            if tree.tn.slicing_bonds and ranked:
+                for add_bond in ranked:
+                    if add_bond in tree.tn.slicing_bonds:
+                        continue
+                    tree.slicing(add_bond)
+                    tc_tmp, sc_tmp, mc_tmp = tree.tree_complexity()
+                    candidate_score = score_fn(tc_tmp, sc_tmp, mc_tmp, sc_target, alpha)
+                    if sc_tmp <= sc_target and candidate_score < current_score:
+                        if best_move is None or candidate_score < best_move[0]:
+                            best_move = (candidate_score, remove_bond, add_bond)
+                    tree.add_bond(add_bond)
+            tree.slicing(remove_bond)
+        if best_move is None:
+            break
+        _, remove_bond, add_bond = best_move
+        tree.add_bond(remove_bond)
+        tree.slicing(add_bond)
+        improved = True
+    return improved
+
+
+def post_target_key(tree, sc_target, alpha):
+    tc, sc, mc = tree.tree_complexity()
+    return (
+        len(tree.tn.slicing_bonds),
+        score_fn(tc, sc, mc, sc_target, alpha),
+        tc,
+        mc,
+    )
+
+
 def select_ranked_slicing_bond(tree, current_sc, sc_target, alpha, candidate_limit=4):
     candidate_bonds = tree.ranked_slicing_bonds(current_sc, limit=candidate_limit)
     slicing_scores = []
@@ -176,7 +216,8 @@ def simulate_annealing(
         greedy_strategy="min_dim",
         disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None,
         peak_rebuild_patience=3, peak_rebuild_size=5, peak_rebuild_vertex_limit=3,
-        peak_rebuild_min_sc_delta=None, max_parallel_workers=None
+        peak_rebuild_min_sc_delta=None, max_parallel_workers=None,
+        post_target_betas=0, post_target_rounds=0, slice_replace_rounds=0
     ):
     greedy_order = GreedyOrderFinder(tensor_network)
     # order, tc, sc = greedy_order('min_dim', seed)
@@ -212,7 +253,7 @@ def simulate_annealing(
             iters, betas, start_seed + i, slicing_repeat, alpha, update_mode,
             disable_slicing, min_sc_before_slicing, max_slice_steps, max_slices,
             peak_rebuild_patience, peak_rebuild_size, peak_rebuild_vertex_limit,
-            peak_rebuild_min_sc_delta
+            peak_rebuild_min_sc_delta, post_target_betas, post_target_rounds, slice_replace_rounds
         ) for i in range(trials)]
     if update_mode == "optimized" and trials == 1:
         results = [sa_trial(*args[0])]
@@ -239,7 +280,7 @@ def sa_trial(
         slicing_repeat=4, alpha=32.0, update_mode="optimized",
         disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None,
         peak_rebuild_patience=3, peak_rebuild_size=5, peak_rebuild_vertex_limit=3,
-        peak_rebuild_min_sc_delta=None
+        peak_rebuild_min_sc_delta=None, post_target_betas=0, post_target_rounds=0, slice_replace_rounds=0
     ):
     init_tc, init_sc, init_mc = init_result
     init_score = score_fn(init_tc, init_sc, init_mc, sc_target, alpha)
@@ -333,6 +374,30 @@ def sa_trial(
             current_tc, current_sc, current_mc = tree.tree_complexity()
         if tree.tn.slicing_bonds:
             reduce_slices(tree, sc_target, alpha)
+            if slice_replace_rounds > 0:
+                for _ in range(slice_replace_rounds):
+                    if not replace_slices(tree, sc_target, alpha):
+                        break
+                    reduce_slices(tree, sc_target, alpha)
+        if post_target_betas > 0 and tree.tn.slicing_bonds:
+            refine_betas = betas[-min(post_target_betas, len(betas)):]
+            refine_rounds = max(1, post_target_rounds)
+            best_post = (
+                post_target_key(tree, sc_target, alpha),
+                snapshot_tree(tree),
+            )
+            for _ in range(refine_rounds):
+                for beta in refine_betas:
+                    for _ in range(max(1, min(2, iters))):
+                        tree_update(tree.tree[tree.all_tensors], tree, beta, rng, sc_target=sc_target, alpha=alpha)
+                reduce_slices(tree, sc_target, alpha)
+                if slice_replace_rounds > 0:
+                    replace_slices(tree, sc_target, alpha)
+                    reduce_slices(tree, sc_target, alpha)
+                candidate_key = post_target_key(tree, sc_target, alpha)
+                if candidate_key < best_post[0]:
+                    best_post = (candidate_key, snapshot_tree(tree))
+            tree = restore_tree(base_tensor_network, best_post[1])
         current_tc, current_sc, current_mc = tree.tree_complexity()
         result = (
             score_fn(current_tc, current_sc, current_mc, sc_target, alpha),

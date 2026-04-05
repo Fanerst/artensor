@@ -7,7 +7,6 @@ import sys
 from traceback import print_exc
 from collections import deque
 from collections import Counter
-from types import SimpleNamespace
 
 
 class ContractionVertex:
@@ -66,7 +65,7 @@ class ContractionVertex:
                 self.contain_bonds_mask,
                 self.contract_bonds_mask,
                 self.all_bonds_mask,
-            ) = get_tc_sc_contraction(tn, left, right)
+            ) = merge_vertex_info_masks(tn, left, right)
             self._contain_bonds = None
             self._contract_bonds = None
             self._all_bonds = None
@@ -115,31 +114,6 @@ def get_tc_sc_inner(tn:AbstractTensorNetwork, part):
     return 0.0, tn.sum_log2_dims_mask(bonds_mask) + multiconfig_factor, multiconfig_factor, 0.0, bonds_mask
 
 
-def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, right:ContractionVertex):
-    """
-    Calculating complexity of contracting tensors in left and right
-    return tc, sc, resulting_bonds and mc
-    """
-    (
-        tc,
-        sc,
-        multiconfig_factor,
-        result_bonds_mask,
-        mc,
-        contract_bonds_mask,
-        all_bonds_mask,
-    ) = merge_vertex_info_masks(tn, left, right)
-    return (
-        tc,
-        sc,
-        multiconfig_factor,
-        mc,
-        result_bonds_mask,
-        contract_bonds_mask,
-        all_bonds_mask,
-    )
-
-
 def _contract_bonds_mask(tn:AbstractTensorNetwork, common_bonds_mask, contracted_tensor_mask):
     contract_bonds_mask = 0
     remaining_common = common_bonds_mask
@@ -174,7 +148,7 @@ def merge_vertex_info_masks(tn:AbstractTensorNetwork, left, right):
         ])
     else:
         mc = log2sumexp2([left.sc, right.sc, sc])
-    return tc, sc, multiconfig_factor, result_bonds_mask, mc, contract_bonds_mask, all_bonds_mask
+    return tc, sc, multiconfig_factor, mc, result_bonds_mask, contract_bonds_mask, all_bonds_mask
 
 
 def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
@@ -182,8 +156,8 @@ def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
         tc,
         sc,
         multiconfig_factor,
-        result_bonds_mask,
         mc,
+        result_bonds_mask,
         contract_bonds_mask,
         all_bonds_mask,
     ) = merge_vertex_info_masks(tn, left, right)
@@ -195,8 +169,45 @@ def merge_vertex_info(tn:AbstractTensorNetwork, left, right):
 
 def local_tree_score(branch, root, leaves):
     tc = log10sumexp2_pair(branch.tc, root.tc)
-    sc = max(*(leaf.sc for leaf in leaves), branch.sc, root.sc)
+    sc = branch.sc
+    if root.sc > sc:
+        sc = root.sc
+    for leaf in leaves:
+        if leaf.sc > sc:
+            sc = leaf.sc
     mc = log10sumexp2_pair(branch.mc, root.mc)
+    return tc, sc, mc
+
+
+def merge_candidate_vertex_with_node(
+        tn,
+        left_tensor_mask,
+        left_bonds_mask,
+        left_sc,
+        left_multiconfig_factor,
+        right,
+    ):
+    contracted_tensor_mask = left_tensor_mask | right.contain_tensor_mask
+    all_bonds_mask = left_bonds_mask | right.contain_bonds_mask
+    common_bonds_mask = left_bonds_mask & right.contain_bonds_mask
+    contract_bonds_mask = _contract_bonds_mask(tn, common_bonds_mask, contracted_tensor_mask)
+    result_bonds_mask = all_bonds_mask & ~contract_bonds_mask
+    combined_multiconfig_factor = left_multiconfig_factor + right.multiconfig_factor
+    multiconfig_factor = min(tn.log2_max_bitstring, combined_multiconfig_factor)
+
+    all_bonds_cost = tn.sum_log2_dims_mask(all_bonds_mask)
+    tc = all_bonds_cost if contract_bonds_mask else all_bonds_cost - 1
+    sc = tn.sum_log2_dims_mask(result_bonds_mask)
+    tc += multiconfig_factor
+    sc += multiconfig_factor
+    if combined_multiconfig_factor > tn.log2_max_bitstring:
+        mc = log2sumexp2([
+            left_sc - left_multiconfig_factor + multiconfig_factor,
+            right.sc - right.multiconfig_factor + multiconfig_factor,
+            sc,
+        ])
+    else:
+        mc = log2sumexp2([left_sc, right.sc, sc])
     return tc, sc, mc
 
 
@@ -205,20 +216,19 @@ def candidate_local_tree_score(tn, first, second, third):
         mid_tc,
         mid_sc,
         mid_multiconfig_factor,
-        mid_bonds_mask,
         mid_mc,
+        mid_bonds_mask,
         mid_contract_bonds_mask,
         mid_all_bonds_mask,
     ) = merge_vertex_info_masks(tn, first, second)
-    mid = SimpleNamespace(
-        contain_tensor_mask=first.contain_tensor_mask | second.contain_tensor_mask,
-        contain_bonds_mask=mid_bonds_mask,
-        multiconfig_factor=mid_multiconfig_factor,
-        sc=mid_sc,
-        all_bonds_mask=mid_all_bonds_mask,
-        contract_bonds_mask=mid_contract_bonds_mask,
+    root_tc, root_sc, root_mc = merge_candidate_vertex_with_node(
+        tn,
+        first.contain_tensor_mask | second.contain_tensor_mask,
+        mid_bonds_mask,
+        mid_sc,
+        mid_multiconfig_factor,
+        third,
     )
-    root_tc, root_sc, _, _, root_mc, _, _ = merge_vertex_info_masks(tn, mid, third)
     tc = log10sumexp2_pair(mid_tc, root_tc)
     sc = max(first.sc, second.sc, third.sc, mid_sc, root_sc)
     mc = log10sumexp2_pair(mid_mc, root_mc)

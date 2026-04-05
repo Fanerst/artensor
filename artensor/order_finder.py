@@ -173,6 +173,7 @@ def optimize_peak_subtree(tree, sc_target, alpha, subtree_size=5, vertex_limit=3
 def simulate_annealing(
         tensor_network, sc_target=-1, trials=10, iters=50, betas=np.linspace(0.1, 10, 100), 
         slicing_repeat=4, start_seed=0, alpha=32.0, update_mode="optimized", greedy_alpha=0.0,
+        greedy_strategy="min_dim",
         disable_slicing=False, min_sc_before_slicing=None, max_slice_steps=None, max_slices=None,
         peak_rebuild_patience=3, peak_rebuild_size=5, peak_rebuild_vertex_limit=3,
         peak_rebuild_min_sc_delta=None, max_parallel_workers=None
@@ -200,7 +201,7 @@ def simulate_annealing(
     init_tree = [
         ContractionTree(
             tensor_network.clone(),
-            greedy_order('min_dim', start_seed + i, alpha=greedy_alpha_options[i % len(greedy_alpha_options)])[0], 
+            greedy_order(greedy_strategy, start_seed + i, alpha=greedy_alpha_options[i % len(greedy_alpha_options)])[0], 
             0
         )
         for i in range(trials)

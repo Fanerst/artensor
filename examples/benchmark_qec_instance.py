@@ -109,6 +109,7 @@ def main():
     parser.add_argument("--beta-steps", type=int, default=20)
     parser.add_argument("--alpha", type=float, default=64.0)
     parser.add_argument("--greedy-alpha", type=float, default=0.0)
+    parser.add_argument("--greedy-strategy", default="min_dim")
     parser.add_argument("--slicing-repeat", type=int, default=8)
     parser.add_argument("--disable-slicing", action="store_true")
     parser.add_argument("--min-sc-before-slicing", type=float, default=None)
@@ -132,6 +133,7 @@ def main():
         beta_steps=args.beta_steps,
         alpha=args.alpha,
         greedy_alpha=args.greedy_alpha,
+        greedy_strategy=args.greedy_strategy,
         disable_slicing=args.disable_slicing,
         min_sc_before_slicing=args.min_sc_before_slicing,
         max_slice_steps=args.max_slice_steps,
@@ -169,13 +171,14 @@ def main():
     greedy_order = GreedyOrderFinder(tensor_network)
 
     stage_start = time.perf_counter()
-    order, greedy_tc, greedy_sc = greedy_order("min_dim", args.seed, alpha=args.greedy_alpha)
+    order, greedy_tc, greedy_sc = greedy_order(args.greedy_strategy, args.seed, alpha=args.greedy_alpha)
     log_event(
         "greedy_done",
         elapsed_s=time.perf_counter() - stage_start,
         tc=greedy_tc,
         sc=greedy_sc,
         order_len=len(order),
+        greedy_strategy=args.greedy_strategy,
     )
 
     stage_start = time.perf_counter()

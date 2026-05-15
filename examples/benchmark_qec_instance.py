@@ -100,6 +100,68 @@ def reduce_slices_with_logging(tree, sc_target, alpha):
     return tree
 
 
+def restore_slices_with_refinement(
+    tree,
+    base_tensor_network,
+    sc_target,
+    alpha,
+    refine_betas,
+    refine_iters,
+    rng,
+    rounds,
+):
+    for round_idx in range(rounds):
+        current_key = post_target_key(tree, sc_target, alpha)
+        best_candidate = None
+        for bond in list(tree.tn.slicing_bonds.keys()):
+            snapshot = snapshot_tree(tree)
+            trial_tree = restore_tree(base_tensor_network, snapshot)
+            trial_tree.add_bond(bond)
+            for beta in refine_betas:
+                for _ in range(refine_iters):
+                    tree_update(
+                        trial_tree.tree[trial_tree.all_tensors],
+                        trial_tree,
+                        beta,
+                        rng,
+                        sc_target=sc_target,
+                        alpha=alpha,
+                    )
+            reduce_slices(trial_tree, sc_target, alpha)
+            tc, sc, mc = trial_tree.tree_complexity()
+            if sc > sc_target:
+                continue
+            candidate_key = post_target_key(trial_tree, sc_target, alpha)
+            if candidate_key < current_key and (
+                best_candidate is None or candidate_key < best_candidate[0]
+            ):
+                best_candidate = (candidate_key, snapshot_tree(trial_tree), bond, tc, sc, mc)
+        if best_candidate is None:
+            tc, sc, mc = tree.tree_complexity()
+            log_event(
+                "restore_refine_done",
+                round=round_idx + 1,
+                restored_bond=None,
+                remaining_slices=len(tree.tn.slicing_bonds),
+                tc=tc,
+                sc=sc,
+                mc=mc,
+            )
+            break
+        _, snapshot, bond, tc, sc, mc = best_candidate
+        tree = restore_tree(base_tensor_network, snapshot)
+        log_event(
+            "restore_refine_done",
+            round=round_idx + 1,
+            restored_bond=int(bond),
+            remaining_slices=len(tree.tn.slicing_bonds),
+            tc=tc,
+            sc=sc,
+            mc=mc,
+        )
+    return tree
+
+
 def main():
     parser = argparse.ArgumentParser(description="Benchmark artensor on a QEC equation file.")
     parser.add_argument("equation", type=Path)
@@ -128,6 +190,8 @@ def main():
     parser.add_argument("--slice-replace-rounds", type=int, default=0)
     parser.add_argument("--slice-candidate-limit", type=int, default=4)
     parser.add_argument("--replace-candidate-limit", type=int, default=4)
+    parser.add_argument("--restore-refine-rounds", type=int, default=0)
+    parser.add_argument("--restore-refine-betas", type=int, default=0)
     args = parser.parse_args()
 
     run_start = time.perf_counter()
@@ -158,6 +222,8 @@ def main():
         slice_replace_rounds=args.slice_replace_rounds,
         slice_candidate_limit=args.slice_candidate_limit,
         replace_candidate_limit=args.replace_candidate_limit,
+        restore_refine_rounds=args.restore_refine_rounds,
+        restore_refine_betas=args.restore_refine_betas,
     )
 
     stage_start = time.perf_counter()
@@ -425,6 +491,19 @@ def main():
                     num_slices=len(tree.tn.slicing_bonds),
                 )
             tree = restore_tree(base_tensor_network, best_post_snapshot)
+        if args.restore_refine_rounds > 0 and tree.tn.slicing_bonds:
+            refine_betas = betas[-min(max(1, args.restore_refine_betas), len(betas)):]
+            refine_iters = max(1, min(2, args.iters))
+            tree = restore_slices_with_refinement(
+                tree,
+                base_tensor_network,
+                args.sc_target,
+                args.alpha,
+                refine_betas,
+                refine_iters,
+                rng,
+                args.restore_refine_rounds,
+            )
     tc, sc, mc = tree.tree_complexity()
     slicing_bonds = {int_to_bond[bond]: dim for bond, dim in tree.tn.slicing_bonds.items()}
     log_event(

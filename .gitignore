@@ -12,3 +12,5 @@ artensor_experimenting/
 artensor_legacy/
 asc/
 rbm/
+.venv/
+build/

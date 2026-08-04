@@ -79,7 +79,12 @@ def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, righ
     contracted_tensors = left.contain_tensors | right.contain_tensors
     all_bonds = left.contain_bonds | right.contain_bonds
     common_bonds = left.contain_bonds & right.contain_bonds
-    contract_bonds = set([bond for bond in common_bonds if tn.bond_tensors[bond].issubset(contracted_tensors)])
+    contract_bonds = {
+        bond
+        for bond in common_bonds
+        if bond not in tn.output_bonds
+        and tn.bond_tensors[bond].issubset(contracted_tensors)
+    }
     result_bonds = all_bonds - contract_bonds
 
     # l_num_fq = final_qubits_num(tn.num_fq, left.contain_tensors)
@@ -96,7 +101,7 @@ def get_tc_sc_contraction(tn:AbstractTensorNetwork, left:ContractionVertex, righ
     combined_multiconfig_factor = left.multiconfig_factor + right.multiconfig_factor
     multiconfig_factor = min(tn.log2_max_bitstring, combined_multiconfig_factor)
 
-    tc = log2_accum_dims(tn.bond_dims, all_bonds) if contract_bonds else log2_accum_dims(tn.bond_dims, all_bonds) - 1 # not -1, fix later
+    tc = log2_accum_dims(tn.bond_dims, all_bonds)
     sc = log2_accum_dims(tn.bond_dims, result_bonds)
     tc += multiconfig_factor # + batch_contraction_penalty
     sc += multiconfig_factor
@@ -249,8 +254,6 @@ class ContractionTree:
                 sc = vertex.sc - log2(self.tn.bond_dims[bond]) if bond in vertex.contain_bonds else vertex.sc
                 if vertex.left and vertex.right:
                     tc = vertex.tc - log2(self.tn.bond_dims[bond])
-                    if bond in vertex.contract_bonds and len(vertex.contract_bonds) == 1:
-                        tc -= 1
                     sc_left = vertex.left.sc - log2(self.tn.bond_dims[bond]) if bond in vertex.left.all_bonds else vertex.left.sc
                     sc_right = vertex.right.sc - log2(self.tn.bond_dims[bond]) if bond in vertex.right.all_bonds else vertex.right.sc
                     mc = log2sumexp2([sc_left, sc_right, sc])
@@ -416,8 +419,14 @@ class ContractionTree:
         """
         Calculate the contractin complexity of the contraction tree
         """
-        if tree is None:
-            tree = self.tree.values()
+        full_tree = tree is None
+        if not full_tree:
+            # ``tree`` is normally a short local subtree during a Python
+            # TreeSA proposal.  Materializing a set keeps those membership
+            # checks constant-time.  In particular, never test membership in
+            # ``dict_values`` here: doing so made a full-tree complexity pass
+            # quadratic and dominated slicing on large networks.
+            tree = set(tree)
         if root is None:
             root = self.tree[self.all_tensors]
         # assert root == tree[-1]
@@ -428,7 +437,7 @@ class ContractionTree:
             next_vertices = []
             for vertex in current_vertices:
                 left, right = vertex.left, vertex.right
-                if left in tree and right in tree:
+                if full_tree or (left in tree and right in tree):
                     # factor = min(log2(self.tn.max_bitstring), final_qubits_num(self.tn.num_fq, vertex.contain_tensors))
                     if left and right:
                         next_vertices += [left, right]
@@ -500,5 +509,6 @@ class ContractionTree:
         #     setattr(ctree, attr, deepcopy(getattr(self, attr)))
         
         # ctree = ContractionTree(deepcopy(self.tensor_bonds), deepcopy(self.bond_dims), deepcopy(self.order), self.seed, self.final_qubits, self.max_bitstring)
-        ctree = deepcopy(self)
-        return ctree
+        if type(self.tn) is AbstractTensorNetwork:
+            return ContractionTree(self.tn.copy(), self.tree_to_order())
+        return deepcopy(self)

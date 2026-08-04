@@ -1,10 +1,16 @@
 from math import log2
 
 
+def _stable_label_key(value):
+    if isinstance(value, (int, float, str)):
+        return type(value).__name__, value
+    return type(value).__name__, repr(value)
+
+
 class AbstractTensorNetwork:
     def __init__(
-            self, tensor_bonds:dict, bond_dims:dict, 
-            final_qubits=[], max_bitstring=1
+            self, tensor_bonds, bond_dims:dict,
+            final_qubits=None, max_bitstring=1, output_bonds=None,
         ) -> None:
         """
         Class of abstract tensor network
@@ -21,27 +27,66 @@ class AbstractTensorNetwork:
             maximum number of bitstrings to calculate during contraction
         -----------
         """
-        self.tensor_bonds = tensor_bonds
-        self.bond_dims = bond_dims
-        self.bond_tensors = {bond: set() for bond in self.bond_dims.keys()} # determine tensors corresponding to each bond
-        for i in tensor_bonds.keys():
-            for j in tensor_bonds[i]:
-                self.bond_tensors[j].add(i)
-        self.final_qubits = final_qubits
-        if final_qubits:
-            self.num_fq = [1 if i in final_qubits else 0 for i in tensor_bonds.keys()]
+        if hasattr(tensor_bonds, "items"):
+            self.tensor_bonds = {
+                tensor_id: list(bonds)
+                for tensor_id, bonds in tensor_bonds.items()
+            }
         else:
-            self.num_fq = [0 for i in tensor_bonds.keys()]
+            self.tensor_bonds = {
+                tensor_id: list(bonds)
+                for tensor_id, bonds in enumerate(tensor_bonds)
+            }
+        self.bond_dims = dict(bond_dims)
+        if final_qubits is None:
+            final_qubits = []
+        self.bond_tensors = {bond: set() for bond in self.bond_dims.keys()} # determine tensors corresponding to each bond
+        for i in self.tensor_bonds.keys():
+            for j in self.tensor_bonds[i]:
+                if j not in self.bond_tensors:
+                    raise ValueError(f"missing dimension for bond {j!r}")
+                self.bond_tensors[j].add(i)
+        self.final_qubits = list(final_qubits)
+        if output_bonds is None:
+            output_bonds = ()
+        self.output_bonds = set(output_bonds)
+        missing_outputs = self.output_bonds.difference(self.bond_dims)
+        if missing_outputs:
+            raise ValueError(
+                f"output bonds are missing dimensions: {sorted(map(repr, missing_outputs))[:5]}"
+            )
+        if final_qubits:
+            self.num_fq = [1 if i in final_qubits else 0 for i in self.tensor_bonds.keys()]
+        else:
+            self.num_fq = [0 for i in self.tensor_bonds.keys()]
         self.max_bitstring = max_bitstring
         self.log2_max_bitstring = log2(max_bitstring)
         self.slicing_bonds = {}
         self.slicing_bond_tensors = {}
         pass
+
+    def copy(self):
+        """Copy topology and slicing state without copying numerical tensors."""
+        copied = AbstractTensorNetwork(
+            self.tensor_bonds,
+            self.bond_dims,
+            self.final_qubits,
+            self.max_bitstring,
+            self.output_bonds,
+        )
+        copied.slicing_bonds = dict(self.slicing_bonds)
+        copied.slicing_bond_tensors = {
+            bond: set(tensors)
+            for bond, tensors in self.slicing_bond_tensors.items()
+        }
+        return copied
     
     def slicing(self, bond):
         """
         slicing a bond in the tensor network
         """
+        if bond in self.output_bonds:
+            raise ValueError(f"cannot slice output bond {bond!r}")
         assert bond in self.bond_dims.keys()
         assert bond not in self.slicing_bonds.keys()
         dim = self.bond_dims.pop(bond)
@@ -70,23 +115,32 @@ class AbstractTensorNetwork:
         assert y in self.tensor_bonds.keys()
         bonds_x = set(self.tensor_bonds.pop(x))
         bonds_y = set(self.tensor_bonds.pop(y))
-        contracted_bonds = bonds_x & bonds_y
+        common_bonds = bonds_x & bonds_y
+        contracted_bonds = {
+            bond
+            for bond in common_bonds
+            if bond not in self.output_bonds
+            and self.bond_tensors[bond].issubset({x, y})
+        }
         bonds_new = (bonds_x | bonds_y) - contracted_bonds
         for bond in contracted_bonds:
             self.bond_tensors.pop(bond)
         for bond in bonds_y - contracted_bonds:
-            self.bond_tensors[bond].remove(y)
+            self.bond_tensors[bond].discard(y)
             self.bond_tensors[bond].add(x)
-        self.tensor_bonds[x] = list(bonds_new)
+        self.tensor_bonds[x] = sorted(bonds_new, key=_stable_label_key)
 
     def find_contract_pair(self, tid):
         possible_tid = set().union(
             *[self.bond_tensors[bond] for bond in self.tensor_bonds[tid]]
         )
         possible_tid.discard(tid)
-        tid_to_contract = sorted(
-            possible_tid, key=lambda x:len(self.tensor_bonds[x])
-        )[-1]
+        if not possible_tid:
+            raise ValueError(f"tensor {tid} has no connected contraction partner")
+        tid_to_contract = max(
+            possible_tid,
+            key=lambda tensor_id: (len(self.tensor_bonds[tensor_id]), tensor_id),
+        )
         return tid_to_contract
 
     def _simplify(self, strategy='normal'):
@@ -97,7 +151,7 @@ class AbstractTensorNetwork:
         ])
         while len(dangling_tensor_id) > 0:
             new_dangling_id = set([])
-            for tensor_id in dangling_tensor_id:
+            for tensor_id in sorted(dangling_tensor_id):
                 assert len(self.tensor_bonds[tensor_id]) == 1
                 tid_to_contract = self.find_contract_pair(tensor_id)
                 self.contract(tid_to_contract, tensor_id)
@@ -109,7 +163,7 @@ class AbstractTensorNetwork:
             if len(self.tensor_bonds[i]) == 2 and i not in self.final_qubits
         ])
         while len(matrix_tensor_id) > 0:
-            tensor_id = list(matrix_tensor_id)[0]
+            tensor_id = min(matrix_tensor_id)
             assert len(self.tensor_bonds[tensor_id]) == 2
             tid_to_contract = self.find_contract_pair(tensor_id)
             self.contract(tid_to_contract, tensor_id)
@@ -119,7 +173,7 @@ class AbstractTensorNetwork:
             ])
         flipped_bond_tensors = {}
         for key, value in self.bond_tensors.items():
-            value = tuple(value)
+            value = tuple(sorted(value))
             if value not in flipped_bond_tensors:
                 flipped_bond_tensors[value] = [key]
             else:
@@ -179,9 +233,15 @@ def einsum_eq_convert(ixs, iy):
 class NumericalTensorNetwork(AbstractTensorNetwork):
     def __init__(
             self, tensors:dict, tensor_bonds:dict, bond_dims:dict, 
-            final_qubits=[], max_bitstring=1
+            final_qubits=None, max_bitstring=1, output_bonds=None,
         ) -> None:
-        super().__init__(tensor_bonds, bond_dims, final_qubits, max_bitstring)
+        super().__init__(
+            tensor_bonds,
+            bond_dims,
+            final_qubits,
+            max_bitstring,
+            output_bonds,
+        )
         self.tensors = tensors
         assert self.tensor_bonds.keys() == self.tensors.keys()
         self.slicing_indices = {}
@@ -190,6 +250,8 @@ class NumericalTensorNetwork(AbstractTensorNetwork):
         """
         slicing a bond in the numerical tensor network
         """
+        if bond in self.output_bonds:
+            raise ValueError(f"cannot slice output bond {bond!r}")
         assert bond in self.bond_dims.keys()
         assert bond not in self.slicing_bonds.keys()
         dim = self.bond_dims.pop(bond)
@@ -200,7 +262,7 @@ class NumericalTensorNetwork(AbstractTensorNetwork):
             if bond not in self.slicing_indices.keys():
                 self.slicing_indices[bond] = [(tensor_id, bond_ind)]
             else:
-                self.slicing_indices[bond].append([(tensor_id, bond_ind)])
+                self.slicing_indices[bond].append((tensor_id, bond_ind))
         self.slicing_bonds[bond] = dim
         self.slicing_bond_tensors[bond] = tensors
     
@@ -208,14 +270,20 @@ class NumericalTensorNetwork(AbstractTensorNetwork):
         assert x in self.tensor_bonds.keys()
         assert y in self.tensor_bonds.keys()
         bonds_x, bonds_y = self.tensor_bonds.pop(x), self.tensor_bonds.pop(y)
-        contracted_bonds = [bond for bond in bonds_x if bond in bonds_y]
-        bonds_new = [
+        common_bonds = set(bonds_x) & set(bonds_y)
+        contracted_bonds = {
+            bond
+            for bond in common_bonds
+            if bond not in self.output_bonds
+            and self.bond_tensors[bond].issubset({x, y})
+        }
+        bonds_new = list(dict.fromkeys(
             bond for bond in bonds_x + bonds_y if bond not in contracted_bonds
-        ]
+        ))
         for bond in contracted_bonds:
             self.bond_tensors.pop(bond)
         for bond in [bond for bond in bonds_y if bond not in contracted_bonds]:
-            self.bond_tensors[bond].remove(y)
+            self.bond_tensors[bond].discard(y)
             self.bond_tensors[bond].add(x)
         self.tensor_bonds[x] = bonds_new
         # print(self.tensors[x].shape, bonds_x, self.tensors[y].shape, bonds_y)

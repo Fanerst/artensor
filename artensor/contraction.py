@@ -20,6 +20,150 @@ def einsum_eq_convert(ixs, iy):
     return einsum_eq
 
 
+def _einsum_operation(ixs, iy):
+    """Compile an einsum string, or a named binary operation if it is too wide.
+
+    PyTorch einsum equations have a finite symbol alphabet.  Sparse-state
+    contractions can exceed it because physical bitstring axes are carried in
+    addition to the ordinary tensor-network bonds.  Keep the compact equation
+    form for normal steps and retain the original labels for wide binary steps.
+    """
+    unique_labels = list(dict.fromkeys(sum(ixs, start=[]) + iy))
+    if len(unique_labels) <= len(letters):
+        return einsum_eq_convert(ixs, iy)
+    if len(ixs) != 2:
+        raise ValueError("the unlimited-label fallback supports binary einsums")
+    return {
+        "op": "binary_named_contract",
+        "left_labels": list(ixs[0]),
+        "right_labels": list(ixs[1]),
+        "output_labels": list(iy),
+    }
+
+
+def _sum_single_input_labels(tensor, labels, output_labels, other_labels):
+    """Apply einsum reductions for labels present in only one input."""
+    reduced_labels = list(labels)
+    axes = [
+        axis
+        for axis, label in enumerate(reduced_labels)
+        if label not in output_labels and label not in other_labels
+    ]
+    for axis in reversed(axes):
+        tensor = tensor.sum(dim=axis)
+        reduced_labels.pop(axis)
+    return tensor, reduced_labels
+
+
+def _binary_named_contract(left, right, operation):
+    """Execute a two-input named einsum without a label-count limit.
+
+    Common output labels are treated as batch axes, common omitted labels as
+    contraction axes, and distinct output labels as the two matrix free-axis
+    groups.  Flattening those groups turns the operation into a batched matrix
+    multiplication while preserving arbitrary output-axis order.
+    """
+    left_labels = list(operation["left_labels"])
+    right_labels = list(operation["right_labels"])
+    output_labels = list(operation["output_labels"])
+
+    if left.ndim != len(left_labels) or right.ndim != len(right_labels):
+        raise ValueError(
+            "named contraction labels do not match operand ranks: "
+            f"{len(left_labels)} != {left.ndim} or "
+            f"{len(right_labels)} != {right.ndim}"
+        )
+    if (
+        len(set(left_labels)) != len(left_labels)
+        or len(set(right_labels)) != len(right_labels)
+        or len(set(output_labels)) != len(output_labels)
+    ):
+        raise ValueError("named binary contraction requires unique labels")
+
+    left, left_labels = _sum_single_input_labels(
+        left, left_labels, output_labels, right_labels
+    )
+    right, right_labels = _sum_single_input_labels(
+        right, right_labels, output_labels, left_labels
+    )
+
+    left_set = set(left_labels)
+    right_set = set(right_labels)
+    output_set = set(output_labels)
+    input_set = left_set | right_set
+    if not output_set <= input_set:
+        missing = output_set - input_set
+        raise ValueError(f"output labels are absent from the inputs: {missing}")
+
+    shared_output = [
+        label
+        for label in output_labels
+        if label in left_set and label in right_set
+    ]
+    contracted = [
+        label
+        for label in left_labels
+        if label in right_set and label not in output_set
+    ]
+    left_free = [
+        label
+        for label in left_labels
+        if label not in shared_output and label not in contracted
+    ]
+    right_free = [
+        label
+        for label in right_labels
+        if label not in shared_output and label not in contracted
+    ]
+    result_labels = shared_output + left_free + right_free
+    if set(result_labels) != output_set or len(result_labels) != len(output_labels):
+        raise ValueError("named contraction output is inconsistent with its inputs")
+
+    left_sizes = dict(zip(left_labels, left.shape))
+    right_sizes = dict(zip(right_labels, right.shape))
+    for label in shared_output + contracted:
+        if left_sizes[label] != right_sizes[label]:
+            raise ValueError(
+                f"dimension mismatch for label {label!r}: "
+                f"{left_sizes[label]} != {right_sizes[label]}"
+            )
+
+    left_order = shared_output + left_free + contracted
+    right_order = shared_output + contracted + right_free
+    left_permutation = tuple(left_labels.index(label) for label in left_order)
+    right_permutation = tuple(right_labels.index(label) for label in right_order)
+    if left_permutation != tuple(range(left.ndim)):
+        left = left.permute(left_permutation)
+    if right_permutation != tuple(range(right.ndim)):
+        right = right.permute(right_permutation)
+
+    batch_shape = tuple(left_sizes[label] for label in shared_output)
+    left_shape = tuple(left_sizes[label] for label in left_free)
+    contract_shape = tuple(left_sizes[label] for label in contracted)
+    right_shape = tuple(right_sizes[label] for label in right_free)
+    batch_size = int(np.prod(batch_shape, dtype=np.int64))
+    left_size = int(np.prod(left_shape, dtype=np.int64))
+    contract_size = int(np.prod(contract_shape, dtype=np.int64))
+    right_size = int(np.prod(right_shape, dtype=np.int64))
+
+    result = torch.bmm(
+        left.reshape(batch_size, left_size, contract_size),
+        right.reshape(batch_size, contract_size, right_size),
+    ).reshape(batch_shape + left_shape + right_shape)
+    output_permutation = tuple(result_labels.index(label) for label in output_labels)
+    if output_permutation != tuple(range(result.ndim)):
+        result = result.permute(output_permutation)
+    return result
+
+
+def _execute_binary_operation(operation, left, right):
+    if isinstance(operation, str):
+        return torch.einsum(operation, left, right)
+    if operation.get("op") == "binary_named_contract":
+        return _binary_named_contract(left, right, operation)
+    raise ValueError(f"unsupported contraction operation: {operation!r}")
+
+
 def contraction_scheme(ctree:ContractionTree):
     """
     Compile a contraction scheme according to the contraction tree in a depth-first search way
@@ -144,7 +288,7 @@ def tensor_contraction_sparse(tensors, contraction_scheme, scientific_notation=F
                         if step[3]:
                             tensors[i].insert(
                                 1, 
-                                torch.einsum(
+                                _execute_binary_operation(
                                     step[1],
                                     tensors[i][0][batch_i[k]], 
                                     tensors[j][batch_j[k]], 
@@ -153,20 +297,20 @@ def tensor_contraction_sparse(tensors, contraction_scheme, scientific_notation=F
                         else:
                             tensors[i].insert(
                                 1, 
-                                torch.einsum(
+                                _execute_binary_operation(
                                     step[1],
                                     tensors[i][0][batch_i[k]], 
                                     tensors[j][batch_j[k]])
                             )
                     else:
                         if step[3]:
-                            tensors[i][0] = torch.einsum(
+                            tensors[i][0] = _execute_binary_operation(
                                 step[1],
                                 tensors[i][0][batch_i[k]], 
                                 tensors[j][batch_j[k]], 
                             ).reshape(step[3])
                         else:
-                            tensors[i][0] = torch.einsum(
+                            tensors[i][0] = _execute_binary_operation(
                                 step[1],
                                 tensors[i][0][batch_i[k]], 
                                 tensors[j][batch_j[k]], 
@@ -176,9 +320,11 @@ def tensor_contraction_sparse(tensors, contraction_scheme, scientific_notation=F
             elif len(step) > 3 and len(batch_i) == len(batch_j) == 1:
                 tensors[i] = tensors[i][batch_i[0]]
                 tensors[j] = tensors[j][batch_j[0]]
-                tensors[i] = torch.einsum(step[1], tensors[i], tensors[j])
+                tensors[i] = _execute_binary_operation(
+                    step[1], tensors[i], tensors[j]
+                )
             elif len(step) > 3:
-                tensors[i] = torch.einsum(
+                tensors[i] = _execute_binary_operation(
                     step[1],
                     tensors[i],
                     tensors[j],
@@ -187,7 +333,9 @@ def tensor_contraction_sparse(tensors, contraction_scheme, scientific_notation=F
                     tensors[i] = tensors[i][batch_i[0]]
                 tensors[j] = []
             else:
-                tensors[i] = torch.einsum(step[1], tensors[i], tensors[j])
+                tensors[i] = _execute_binary_operation(
+                    step[1], tensors[i], tensors[j]
+                )
                 tensors[j] = []
         except:
             print(step)
@@ -323,7 +471,7 @@ def contraction_scheme_sparse(ctree:ContractionTree, bitstrings=None, sc_target=
             permute_dim_i = 0
             ix_left = bond_i
         iy = iy + tensor_bonds[i]
-        einsum_eq = einsum_eq_convert((ix_left, ix_right), iy)
+        einsum_eq = _einsum_operation((ix_left, ix_right), iy)
         if permute_dim_i and permute_dim_j:
             next_tensor_shape = (len(tmp_bitstrings_rep),) + (2,) * len(tensor_bonds[i])
             if cat_batch_flag:

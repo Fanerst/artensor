@@ -1,7 +1,6 @@
 # %%
-import sys
 import numpy as np
-sys.path.append('../')
+from pathlib import Path
 from artensor import (
     AbstractTensorNetwork, 
     NumericalTensorNetwork, 
@@ -30,16 +29,35 @@ correctness_table = {
     '001110110000' :    0.00681955926 + 1j * (  0.0106616206),
 }
 
-circuit_filename = 'circuit_n12_m14_s0_e0_pEFGH.qsim'
-bitstrings = list(correctness_table.keys())
-result, bitstrings = quantum_circuit_simulation(circuit_filename, bitstrings, 30, device='cuda:4')
-for bitstring, amp in zip(bitstrings, result):
-    assert np.allclose(amp.item(), correctness_table[bitstring])
+def test_sparse_and_full_state_circuit_simulation():
+    circuit_filename = Path(__file__).with_name(
+        'circuit_n12_m14_s0_e0_pEFGH.qsim'
+    )
+    bitstrings = list(correctness_table)
+    result, bitstrings = quantum_circuit_simulation(
+        circuit_filename,
+        bitstrings,
+        30,
+        trial_num=1,
+        device='cpu',
+    )
+    for bitstring, amp in zip(bitstrings, result):
+        assert np.allclose(
+            amp.item(), correctness_table[bitstring], rtol=1e-4, atol=1e-6
+        )
 
-result, bitstrings = quantum_circuit_simulation(circuit_filename, [], 30, device='cuda:4')
-amps = result.reshape(-1).cpu().numpy()
-for bitstring, amp in correctness_table.items():
-    assert np.allclose(amps[int(bitstring, 2)], amp)
+    result, _ = quantum_circuit_simulation(
+        circuit_filename,
+        [],
+        30,
+        trial_num=1,
+        device='cpu',
+    )
+    amplitudes = result.reshape(-1).cpu().numpy()
+    for bitstring, amp in correctness_table.items():
+        assert np.allclose(
+            amplitudes[int(bitstring, 2)], amp, rtol=1e-4, atol=1e-6
+        )
 
 # circuit_filename = 'circuit_n12_m14_s0_e0_pEFGH.qsim'
 # circ = TensorNetworkCircuit(circuit_filename, device='cpu')

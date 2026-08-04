@@ -1,10 +1,52 @@
 import time
 import pytest
+import torch
 from artensor import (
     ContractionTree, 
     AbstractTensorNetwork,
     GreedyOrderFinder
 )
+from artensor.contraction import (
+    _binary_named_contract,
+    _einsum_operation,
+)
+
+
+def test_unlimited_label_operation_falls_back_to_named_contract():
+    labels = list(range(51))
+    operation = _einsum_operation((labels[:25], labels[25:]), labels)
+    assert operation["op"] == "binary_named_contract"
+    assert operation["output_labels"] == labels
+
+
+def test_binary_named_contract_matches_einsum_with_shared_batch_axis():
+    torch.manual_seed(0)
+    left = torch.randn(2, 3, 4, dtype=torch.float64)
+    right = torch.randn(2, 4, 5, dtype=torch.float64)
+    operation = {
+        "op": "binary_named_contract",
+        "left_labels": [-3, 10, 20],
+        "right_labels": [-3, 20, 30],
+        "output_labels": [30, -3, 10],
+    }
+    result = _binary_named_contract(left, right, operation)
+    expected = torch.einsum("bij,bjk->kbi", left, right)
+    assert torch.allclose(result, expected)
+
+
+def test_binary_named_contract_reduces_single_input_labels():
+    torch.manual_seed(1)
+    left = torch.randn(2, 3, 4, dtype=torch.float64)
+    right = torch.randn(4, 5, 6, dtype=torch.float64)
+    operation = {
+        "op": "binary_named_contract",
+        "left_labels": [0, 1, 2],
+        "right_labels": [2, 3, 4],
+        "output_labels": [0, 3],
+    }
+    result = _binary_named_contract(left, right, operation)
+    expected = torch.einsum("abc,cde->ad", left, right)
+    assert torch.allclose(result, expected)
 
 # ContractionTree, ContractionVertex, AbstractTensorNetwork class tests 
 def test_hyper_tn():
@@ -30,6 +72,7 @@ def test_oridinary_tn():
         for j in range(len(tensor_bonds[i])):
             bond_dims[tensor_bonds[i][j]] = shapes[i][j]
     tensor_network = AbstractTensorNetwork(tensor_bonds, bond_dims)
+    order = GreedyOrderFinder(tensor_network)("min_dim", 0)[0]
     ctree = ContractionTree(tensor_network, order, 0)
     print('tree results', ctree.tree_complexity())
 
@@ -43,6 +86,7 @@ def test_slicing_add():
         for j in range(len(tensor_bonds[i])):
             bond_dims[tensor_bonds[i][j]] = shapes[i][j]
     tensor_network = AbstractTensorNetwork(tensor_bonds, bond_dims)
+    order = GreedyOrderFinder(tensor_network)("min_dim", 0)[0]
     ctree = ContractionTree(tensor_network, order, 0)
 
     t0 = time.time()

@@ -1,154 +1,312 @@
-from .utils import final_qubits_num, log2_accum_dims, log10sumexp2
-from math import log2, ceil
+"""Greedy contraction-order optimizers.
+
+The original implementation selected the next contraction by scanning every
+candidate on every step.  The implementation below keeps a lazy priority heap
+and only recomputes candidates adjacent to the tensor produced by a merge.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import heapq
+from math import inf
+import time
+
 import numpy as np
+
+from .utils import log2_accum_dims, log10sumexp2
+
+
+MULTI_COST_FUNCTIONS = (
+    "balanced_boltzmann",
+    "boltzmann",
+    "max_skew",
+    "anti_balanced",
+    "skew_balanced",
+    "log",
+    "memory_removed_jitter",
+    "batch_balanced",
+)
+
+
+def _compiled_core():
+    try:
+        from . import _order_core
+    except ImportError:
+        return None
+    return _order_core
 
 
 class GreedyOrderFinder:
-    def __init__(self, tensor_network) -> None:
-        """
-        Class of greedy order finder
-        Parameters:
-        -----------
-        tensor_network: AbstractTensorNetwork class
-            the underlying tensor network
-        -----------
-        """
-        self.tn = tensor_network                
-        pass
+    """Find a pairwise contraction order with an incremental greedy search.
 
-    def _construct_pair_info(self):
-        """
-        Construct the pair contraction info
-        """
-        self.pair_info = {}.fromkeys(self.potential_contraction_pair)
-        for pair in self.pair_info.keys():
-            self.pair_info[pair] = self._update_pair_info(pair)
+    Parameters
+    ----------
+    tensor_network:
+        The :class:`~artensor.AbstractTensorNetwork` to optimize.
+    use_compiled:
+        Use Artensor's optional native search core when it is available.
+    """
 
-    def _update_pair_info(self, pair):
-        """
-        Update the pair contraction info
-        """
-        i, j = pair
+    def __init__(self, tensor_network, use_compiled=True) -> None:
+        self.tn = tensor_network
+        self.use_compiled = use_compiled
+
+    def _pair_value(self, i, j):
         contracted_tensors = self.contain_tensors[i] | self.contain_tensors[j]
         all_bonds = self.contain_bonds[i] | self.contain_bonds[j]
         common_bonds = self.contain_bonds[i] & self.contain_bonds[j]
-        contract_bonds = set([bond for bond in common_bonds if self.tn.bond_tensors[bond].issubset(contracted_tensors)])
+        contract_bonds = {
+            bond
+            for bond in common_bonds
+            if bond not in self.tn.output_bonds
+            and self.tn.bond_tensors[bond].issubset(contracted_tensors)
+        }
         result_bonds = all_bonds - contract_bonds
-        factor = min(self.tn.log2_max_bitstring, final_qubits_num(self.tn.num_fq, contracted_tensors))
-        sc = log2_accum_dims(self.tn.bond_dims, result_bonds)
-        sc += factor
-        if 'min_dim' in self.strategy:
-            value = sc
-        elif 'max_reduce' in self.strategy:
-            value = sc - (log2_accum_dims(self.tn.bond_dims, self.contain_bonds[i]) + log2_accum_dims(self.tn.bond_dims, self.contain_bonds[j]))
-        else:
-            value = 1.0
-        return value
-    
-    def contract(self, pair):
-        """
-        Contract a pair and calculate the complexity
-        """
-        i, j = pair
-        pairs_add = []
-        for neigh in self.tensor_neighbors[j]:
-            pair_eliminate = (min(j, neigh), max(j, neigh))
-            self.pair_info.pop(pair_eliminate)
-            if neigh != i and neigh not in self.tensor_neighbors[i]:
-                pairs_add.append((min(i, neigh), max(i, neigh)))
-        pairs_add += [(min(i, m), max(i, m)) for m in self.tensor_neighbors[i] if m != j]
-        pairs_add = set(pairs_add)
+        factor = min(
+            self.tn.log2_max_bitstring,
+            self.final_counts[i] + self.final_counts[j],
+        )
+        output_size = log2_accum_dims(self.tn.bond_dims, result_bonds) + factor
+        if self.strategy == "min_dim":
+            return output_size
+        if self.strategy == "max_reduce":
+            return output_size - self.input_sizes[i] - self.input_sizes[j]
+        raise ValueError(f"unknown greedy strategy {self.strategy!r}")
 
-        contracted_tensors = self.contain_tensors[i] | self.contain_tensors[j]
-        all_bonds = self.contain_bonds[i] | self.contain_bonds[j]
-        common_bonds = self.contain_bonds[i] & self.contain_bonds[j]
-        contract_bonds = set([bond for bond in common_bonds if self.tn.bond_tensors[bond].issubset(contracted_tensors)])
-        result_bonds = all_bonds - contract_bonds
-    
-        l_num_fq = final_qubits_num(self.tn.num_fq, self.contain_tensors[i])
-        r_num_fq = final_qubits_num(self.tn.num_fq, self.contain_tensors[j])
-        num_fq = l_num_fq + r_num_fq
-        factor = min(self.tn.log2_max_bitstring, num_fq)
-        if l_num_fq < self.tn.log2_max_bitstring and r_num_fq < self.tn.log2_max_bitstring and num_fq > ceil(self.tn.log2_max_bitstring):
-            factor += num_fq - ceil(self.tn.log2_max_bitstring)
-        sc = log2_accum_dims(self.tn.bond_dims, result_bonds)
-        tc = log2_accum_dims(self.tn.bond_dims, all_bonds) if contract_bonds else log2_accum_dims(self.tn.bond_dims, all_bonds) - 1
-        sc += factor
-        tc += factor
-        self.contain_tensors[i] = contracted_tensors
-        self.contain_bonds[i] = result_bonds
-        self.tensor_neighbors[i] = self.tensor_neighbors[i] | self.tensor_neighbors[j]
-        self.tensor_neighbors[i].discard(i)
-        self.tensor_neighbors[i].discard(j)
+    def _invalidate(self, pair):
+        self.versions[pair] = self.versions.get(pair, 0) + 1
+        self.pair_info.pop(pair, None)
 
-        for tensor_id in self.tensor_neighbors[j]:
-            if tensor_id != i:
-                self.tensor_neighbors[tensor_id].discard(j)
-                self.tensor_neighbors[tensor_id].add(i)
+    def _push_pair(self, i, j):
+        if i == j or not self.active[i] or not self.active[j]:
+            return
+        pair = (min(i, j), max(i, j))
+        version = self.versions.get(pair, 0) + 1
+        self.versions[pair] = version
+        value = self._pair_value(*pair)
+        self.pair_info[pair] = value
+        self.serial += 1
+        heapq.heappush(
+            self.heap,
+            (value, self.serial, pair[0], pair[1], version),
+        )
 
-        for pair_update in pairs_add:
-            self.pair_info[pair_update] = self._update_pair_info(pair_update)
+    def _valid_entry(self, entry):
+        _, _, i, j, version = entry
+        pair = (i, j)
+        return (
+            self.active[i]
+            and self.active[j]
+            and self.versions.get(pair) == version
+            and pair in self.pair_info
+        )
 
-        return tc, sc
+    def _pop_valid(self):
+        while self.heap:
+            entry = heapq.heappop(self.heap)
+            if self._valid_entry(entry):
+                return entry
+        return None
 
     def _pair_select(self, rng):
-        """
-        select a pair for contraction
-        """
-        min_value = min(self.pair_info.values())
-        min_pairs = [pair for pair in self.pair_info.keys() if self.pair_info[pair] == min_value]
-        pair = min_pairs[rng.choice(range(len(min_pairs)))]
-        return pair
+        first = self._pop_valid()
+        if first is None:
+            return None
+        min_value = first[0]
+        tied = [first]
+        while self.heap and self.heap[0][0] == min_value:
+            entry = heapq.heappop(self.heap)
+            if self._valid_entry(entry):
+                tied.append(entry)
+        selected = int(rng.randint(len(tied)))
+        for index, entry in enumerate(tied):
+            if index != selected:
+                heapq.heappush(self.heap, entry)
+        _, _, i, j, _ = tied[selected]
+        return i, j
 
-    def greedy_order(self, seed):
-        """
-        Return a greedy order according to specific greedy strategy
-        """
-        tcs, scs, order = [], [np.log2(np.prod([self.tn.bond_dims[bond] for bond in self.tn.tensor_bonds[i]])) for i in range(len(self.tn.tensor_bonds))], []
-        rng = np.random.RandomState(seed)
-        uncontract = True
-        while uncontract:
-            if len(self.pair_info) > 0:
-                pair = self._pair_select(rng)
-                tc_step, sc_step = self.contract(pair)
-                order.append(pair)
-                tcs.append(tc_step)
-                scs.append(sc_step)
-            else:
-                involved_nodes = set()
-                for pair in order:
-                    involved_nodes.add(pair[1])
-                uninvolved_nodes = set(list(range(len(self.tn.tensor_bonds)))) - involved_nodes
-                source_node = order[-1][0]
-                for node in uninvolved_nodes:
-                    if node == source_node:
-                        continue
-                    pair = (source_node, node)
-                    tc_step, sc_step = self.contract(pair)
-                    order.append(pair)
-                    tcs.append(tc_step)
-                    scs.append(sc_step)
-                uncontract = False
-        
-        tc = log10sumexp2(tcs)
-        sc = max(scs)
+    def _contract(self, pair):
+        i, j = pair
+        neighbors_i = self.tensor_neighbors[i]
+        neighbors_j = self.tensor_neighbors[j]
+        affected = (neighbors_i | neighbors_j) - {i, j}
 
-        return order, tc, sc
+        for neighbor in neighbors_i:
+            self._invalidate((min(i, neighbor), max(i, neighbor)))
+        for neighbor in neighbors_j:
+            self._invalidate((min(j, neighbor), max(j, neighbor)))
 
-    def __call__(self, strategy='min_dim', seed=0):
-        """
-        Call the class
-        """
+        contracted_tensors = self.contain_tensors[i] | self.contain_tensors[j]
+        all_bonds = self.contain_bonds[i] | self.contain_bonds[j]
+        common_bonds = self.contain_bonds[i] & self.contain_bonds[j]
+        contract_bonds = {
+            bond
+            for bond in common_bonds
+            if bond not in self.tn.output_bonds
+            and self.tn.bond_tensors[bond].issubset(contracted_tensors)
+        }
+        result_bonds = all_bonds - contract_bonds
+
+        combined_final_count = self.final_counts[i] + self.final_counts[j]
+        factor = min(self.tn.log2_max_bitstring, combined_final_count)
+        sc = log2_accum_dims(self.tn.bond_dims, result_bonds) + factor
+        tc = log2_accum_dims(self.tn.bond_dims, all_bonds)
+        tc += factor
+
+        self.contain_tensors[i] = contracted_tensors
+        self.contain_bonds[i] = result_bonds
+        self.final_counts[i] = combined_final_count
+        self.input_sizes[i] = sc
+        self.active[j] = False
+        self.contain_tensors[j] = set()
+        self.contain_bonds[j] = set()
+
+        new_neighbors = {neighbor for neighbor in affected if self.active[neighbor]}
+        self.tensor_neighbors[i] = new_neighbors
+        self.tensor_neighbors[j] = set()
+        for neighbor in new_neighbors:
+            self.tensor_neighbors[neighbor].discard(j)
+            self.tensor_neighbors[neighbor].add(i)
+            self._push_pair(i, neighbor)
+        return tc, sc
+
+    def _initialize(self, strategy):
         self.strategy = strategy
-        self.contain_tensors = [set([i]) for i in range(len(self.tn.tensor_bonds))] 
-        self.contain_bonds = [set(self.tn.tensor_bonds[i]) for i in range(len(self.tn.tensor_bonds))] 
-        self.tensor_neighbors = []
-        for i in range(len(self.contain_tensors)):
-            self.tensor_neighbors.append(set())
+        tensor_ids = list(self.tn.tensor_bonds)
+        if tensor_ids != list(range(len(tensor_ids))):
+            raise ValueError("Artensor tensor IDs must be consecutive integers starting at zero")
+        n = len(tensor_ids)
+        self.active = [True] * n
+        self.contain_tensors = [{i} for i in range(n)]
+        self.contain_bonds = [set(self.tn.tensor_bonds[i]) for i in range(n)]
+        final_qubits = set(self.tn.final_qubits)
+        self.final_counts = [int(i in final_qubits) for i in range(n)]
+        self.input_sizes = [
+            log2_accum_dims(self.tn.bond_dims, self.contain_bonds[i])
+            + min(self.tn.log2_max_bitstring, self.final_counts[i])
+            for i in range(n)
+        ]
+        self.tensor_neighbors = [set() for _ in range(n)]
+        for i in range(n):
             for bond in self.contain_bonds[i]:
-                self.tensor_neighbors[i] = self.tensor_neighbors[i] | self.tn.bond_tensors[bond]
+                self.tensor_neighbors[i].update(self.tn.bond_tensors[bond])
             self.tensor_neighbors[i].discard(i)
-        self.potential_contraction_pair = [(min(i, j), max(i, j)) for i in range(len(self.contain_tensors)) for j in self.tensor_neighbors[i]]
-        self._construct_pair_info()
-        order, tc, sc = self.greedy_order(seed)
+
+        self.heap = []
+        self.versions = {}
+        self.pair_info = {}
+        self.serial = 0
+        for i in range(n):
+            for j in self.tensor_neighbors[i]:
+                if i < j:
+                    self._push_pair(i, j)
+
+    def _python_greedy(self, strategy, seed):
+        self._initialize(strategy)
+        rng = np.random.RandomState(seed)
+        order = []
+        tcs = []
+        scs = list(self.input_sizes)
+
+        while True:
+            pair = self._pair_select(rng)
+            if pair is None:
+                break
+            tc, sc = self._contract(pair)
+            order.append(pair)
+            tcs.append(tc)
+            scs.append(sc)
+
+        active = [i for i, is_active in enumerate(self.active) if is_active]
+        if active:
+            source = active[0]
+            for node in active[1:]:
+                tc, sc = self._contract((source, node))
+                order.append((source, node))
+                tcs.append(tc)
+                scs.append(sc)
+
+        tc = log10sumexp2(tcs) if tcs else -inf
+        sc = max(scs, default=0.0)
         return order, tc, sc
+
+    def __call__(self, strategy="min_dim", seed=0):
+        if strategy not in {"min_dim", "max_reduce"}:
+            raise ValueError(f"unknown greedy strategy {strategy!r}")
+        core = _compiled_core() if self.use_compiled else None
+        if core is not None:
+            return core.greedy_order(self.tn, strategy, int(seed))
+        return self._python_greedy(strategy, seed)
+
+
+@dataclass(frozen=True)
+class MultiCostGreedyResult:
+    order: list[tuple[int, int]]
+    tc: float
+    sc: float
+    cost_function_id: int
+    cost_function_name: str
+    repeats: int
+    elapsed: float
+
+
+class MultiCostGreedyOrderFinder:
+    """Portfolio greedy optimizer from Orgler and Blacher (2024).
+
+    The native core implements the eight cost functions from the reference
+    implementation.  Repeated paths initially explore the full portfolio and
+    then favor the cost function that has produced the best objective.
+    """
+
+    def __init__(self, tensor_network, use_compiled=True):
+        self.tn = tensor_network
+        self.use_compiled = use_compiled
+
+    def __call__(
+        self,
+        *,
+        seed=0,
+        minimize="size",
+        max_repeats=128,
+        max_time=0.0,
+        cost_function_id=None,
+    ):
+        if minimize not in {"size", "flops"}:
+            raise ValueError("minimize must be 'size' or 'flops'")
+        if max_repeats < 1:
+            raise ValueError("max_repeats must be positive")
+        if cost_function_id is not None and not 0 <= cost_function_id < 8:
+            raise ValueError("cost_function_id must be between 0 and 7")
+        core = _compiled_core() if self.use_compiled else None
+        if core is None:
+            raise RuntimeError(
+                "MultiCostGreedyOrderFinder requires Artensor's native extension; "
+                "reinstall Artensor so its C++ extension can be built"
+            )
+        started = time.perf_counter()
+        order, tc, sc, selected, completed = core.multicost_greedy_order(
+            self.tn,
+            int(seed),
+            minimize,
+            int(max_repeats),
+            float(max_time),
+            -1 if cost_function_id is None else int(cost_function_id),
+        )
+        return MultiCostGreedyResult(
+            order=order,
+            tc=tc,
+            sc=sc,
+            cost_function_id=selected,
+            cost_function_name=MULTI_COST_FUNCTIONS[selected],
+            repeats=completed,
+            elapsed=time.perf_counter() - started,
+        )
+
+
+__all__ = [
+    "GreedyOrderFinder",
+    "MultiCostGreedyOrderFinder",
+    "MultiCostGreedyResult",
+    "MULTI_COST_FUNCTIONS",
+]

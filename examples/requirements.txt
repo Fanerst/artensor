@@ -1,7 +1,9 @@
-# Note that you need to manually install pytorch to run examples of this repo
+# PyTorch 2.10.0 fixes CVE-2026-24747; 2.13.0 also fixes the remaining known
+# advisory affecting 2.10-2.12. Install a matching CPU or CUDA wheel from the
+# official PyTorch index when the default PyPI wheel is not suitable.
 # Be careful that the default networkx version dependence of cirq(0.7.0) is 2.3, 
 # but in order to correctly use cirq to read circuit files, you need to manually install a higher version
 # run "pip install --upgrade --no-deps --force-reinstall networkx==2.5"
 cirq==0.7.0
 scipy==1.10.0
-pytorch==1.12.1
+torch>=2.13.0

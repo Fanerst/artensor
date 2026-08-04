@@ -1,4 +1,2 @@
-pytorch
 numpy
-math
-multiprocessing
+torch>=2.13.0

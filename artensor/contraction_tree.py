@@ -191,10 +191,12 @@ class ContractionTree:
 
     def select_slicing_bonds(self):
         """
-        Select the set of bonds which make up the biggest intermediate tensors to slice
+        Select the set of bonds which make up the biggest intermediate tensors to slice.
+        Output bonds are kept in the result of the contraction and are never candidates.
         """
         _, sc, _ = self.tree_complexity()
         slicing_bonds_pool = set().union(*[vertex.contain_bonds for vertex in self.tree.values() if vertex.sc == sc])
+        slicing_bonds_pool -= self.tn.output_bonds
         # if len(slicing_bonds_pool) == 0:
         #     for vertex in self.tree.values():
         #         if vertex.sc == sc:
@@ -202,7 +204,11 @@ class ContractionTree:
         #             print(vertex.contain_bonds)
         #             print(vertex.contract_bonds)
         #             print(vertex.tc, vertex.sc)
-        assert len(slicing_bonds_pool) > 0
+        if len(slicing_bonds_pool) == 0:
+            raise ValueError(
+                f"cannot slice below space complexity {sc:.2f}: the largest tensors "
+                "have no bond left to slice (output bonds are never sliced)"
+            )
         return slicing_bonds_pool
 
     def slicing(self, bond):

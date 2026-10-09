@@ -61,6 +61,21 @@ order, sliced_bonds = simulate_annealing(
 `greedy_strategy="multi_cost"` on `simulate_annealing` to initialize TreeSA
 from the portfolio optimizer.
 
+Bonds listed in `output_bonds` of the tensor network (a shared batch index, for
+example) are never sliced. If the contraction cannot be sliced at all, pass
+`slicing=False`: `sc_target` then only acts as a penalty during the annealing
+and the best order is returned unsliced, even if it is still above `sc_target`.
+`trial_callback` reports the complexity each trial reached:
+
+```python
+order, _ = simulate_annealing(
+    tn,
+    sc_target=30,
+    slicing=False,
+    trial_callback=lambda trial, tc, sc, mc: print(trial, tc, sc),
+)
+```
+
 ### Reading an OME order
 
 OMEinsumContractionOrders JSON trees can be used directly without a separate

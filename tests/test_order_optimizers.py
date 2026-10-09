@@ -167,3 +167,84 @@ def test_hyperedge_is_retained_until_all_incident_tensors_are_merged():
     assert network.bond_tensors["h"] == {0, 2}
     network.contract(0, 2)
     assert "h" not in network.tensor_bonds[0]
+
+
+def batched_network(batch=8):
+    """2x2x2 grid whose tensors 0, 3, 5, 6 share an output (batch) bond.
+
+    No contraction tree of this network has sc below 7 (checked by exhaustive search).
+    """
+    network = grid_network(2)
+    tensor_bonds = {
+        tensor_id: list(bonds) for tensor_id, bonds in network.tensor_bonds.items()
+    }
+    for tensor_id in (0, 3, 5, 6):
+        tensor_bonds[tensor_id].append("batch")
+    return AbstractTensorNetwork(
+        tensor_bonds,
+        {**network.bond_dims, "batch": batch},
+        output_bonds=["batch"],
+    )
+
+
+@pytest.mark.parametrize("use_compiled", [True, False])
+def test_slicing_never_selects_output_bonds(use_compiled):
+    network = batched_network()
+    sc_target = 5.0
+    order, slicing_bonds = simulate_annealing(
+        network,
+        sc_target=sc_target,
+        trials=2,
+        iters=2,
+        betas=np.linspace(0.1, 10.0, 8),
+        workers=1,
+        use_compiled=use_compiled,
+    )
+    assert len(slicing_bonds) > 0
+    assert "batch" not in slicing_bonds
+    for bond in slicing_bonds:
+        network.slicing(bond)
+    tree = ContractionTree(network, order)
+    assert tree.tree_complexity()[1] <= sc_target
+    assert tree.tree[tree.all_tensors].contain_bonds == {"batch"}
+
+
+def test_sc_target_below_output_bonds_is_reported():
+    # The result tensor alone has sc = log2(8) = 3.
+    with pytest.raises(ValueError, match="output bonds are never sliced"):
+        simulate_annealing(
+            batched_network(),
+            sc_target=2.0,
+            trials=1,
+            iters=1,
+            betas=[1.0],
+            workers=1,
+        )
+
+
+@pytest.mark.parametrize("use_compiled", [True, False])
+def test_annealing_without_slicing_returns_unsliced_order(use_compiled):
+    network = batched_network()
+    sc_target, alpha, trials = 5.0, 32.0, 3
+    reported = []
+    order, slicing_bonds = simulate_annealing(
+        network,
+        sc_target=sc_target,
+        trials=trials,
+        iters=2,
+        betas=np.linspace(0.1, 10.0, 8),
+        alpha=alpha,
+        workers=1,
+        use_compiled=use_compiled,
+        slicing=False,
+        trial_callback=lambda *result: reported.append(result),
+    )
+    assert slicing_bonds == {}
+    assert len(order) == len(network.tensor_bonds) - 1
+    tc, sc, mc = ContractionTree(network, order).tree_complexity()
+    assert sc > sc_target
+    assert [trial for trial, *_ in reported] == list(range(trials))
+    assert np.isclose(
+        score_fn(tc, sc, mc, sc_target, alpha),
+        min(score_fn(*metrics, sc_target, alpha) for _, *metrics in reported),
+    )

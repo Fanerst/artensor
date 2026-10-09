@@ -37,8 +37,22 @@ def simulate_annealing(
         tensor_network, sc_target=-1, trials=10, iters=50, betas=np.linspace(0.1, 10, 100), 
         slicing_repeat=4, start_seed=0, alpha=32.0, workers=None,
         use_compiled=True, greedy_strategy="min_dim", greedy_repeats=16,
-        greedy_max_time=0.0,
+        greedy_max_time=0.0, slicing=True, trial_callback=None,
     ):
+    """
+    Simulated annealing of the contraction tree, started from ``trials`` greedy orders.
+    Trials that end above ``sc_target`` then slice bonds (never output bonds) until they
+    reach it. Returns the best order and its slicing bonds.
+
+    slicing: bool
+        if False, skip the slicing stage: ``sc_target`` only enters as the penalty of
+        ``score_fn`` and the best annealed order is returned with no slicing bonds, even
+        if it is still above ``sc_target``
+    trial_callback: callable or None
+        called as ``trial_callback(trial, tc, sc, mc)`` once per trial, in order, with the
+        complexity of its annealed order before any slicing. The compiled core calls it
+        as soon as each trial finishes, the Python fallback after all of them.
+    """
     if trials < 1:
         raise ValueError("trials must be positive")
     if alpha < 0:
@@ -90,7 +104,9 @@ def simulate_annealing(
             )
             trial_score = score_fn(tc, sc, mc, sc_target, alpha)
             native_results.append((trial_score, sc, order))
-        if all(sc <= sc_target for _, sc, _ in native_results):
+            if trial_callback is not None:
+                trial_callback(trial, tc, sc, mc)
+        if not slicing or all(sc <= sc_target for _, sc, _ in native_results):
             _, _, best_order = min(native_results, key=lambda result: result[0])
             return best_order, {}
         # Reuse the native-optimized topologies as the starting point for
@@ -122,16 +138,21 @@ def simulate_annealing(
         (
             init_tree[i], sc_target, init_tree[i].tree_complexity(),
             iters, betas, start_seed + i, slicing_repeat, alpha, use_compiled,
-            native_initial_orders is not None,
+            native_initial_orders is not None, slicing,
         ) for i in range(trials)]
     if workers is None:
         workers = trials
     workers = max(1, min(int(workers), trials))
     if workers == 1:
-        results = [sa_trial(*arg) for arg in args]
+        results = [_sa_trial(*arg) for arg in args]
     else:
         with mp.Pool(workers) as pool:
-            results = pool.starmap(sa_trial, args)
+            results = pool.starmap(_sa_trial, args)
+    # The native prepass above has already reported its trials.
+    if trial_callback is not None and native_initial_orders is None:
+        for trial, (annealed_metrics, _) in enumerate(results):
+            trial_callback(trial, *annealed_metrics)
+    results = [result for _, result in results]
     results_slicing = [
         (
             _sliced_result_key(
@@ -152,6 +173,20 @@ def sa_trial(
         slicing_repeat=4, alpha=32.0, use_compiled=True,
         initial_optimized=False,
     ):
+    return _sa_trial(
+        tree, sc_target, init_result, iters, betas, seed,
+        slicing_repeat, alpha, use_compiled, initial_optimized, True,
+    )[1]
+
+
+def _sa_trial(
+        tree, sc_target, init_result, iters, betas, seed,
+        slicing_repeat, alpha, use_compiled, initial_optimized, slicing,
+    ):
+    """
+    One trial of simulate_annealing. Besides the result of ``sa_trial`` it returns the
+    complexity (tc, sc, mc) of the annealed order before any slicing.
+    """
     init_tc, init_sc, init_mc = init_result
     init_score = score_fn(init_tc, init_sc, init_mc, sc_target, alpha)
     rng = np.random.RandomState(seed)
@@ -201,6 +236,9 @@ def sa_trial(
                         best_python_result = (result, tree.copy())
             current_result = best_python_result
 
+    annealed_metrics = current_result[0][1:]
+    if not slicing:
+        return annealed_metrics, current_result
     optimized_sc = current_result[0][2]
     best_feasible = None
 
@@ -285,8 +323,8 @@ def sa_trial(
         retain_if_feasible(current_result)
         slicing_loop += 1
     if best_feasible is not None:
-        return best_feasible[1]
-    return current_result
+        return annealed_metrics, best_feasible[1]
+    return annealed_metrics, current_result
 
 
 def determine_old_order(vertex, local_tree_leaves):

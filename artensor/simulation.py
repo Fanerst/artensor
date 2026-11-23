@@ -30,6 +30,26 @@ def get_bond_tensors(tensor_bonds):
             bond_tensors[j].add(i)
     return bond_tensors
 
+def _slice_tensors(tensors, slicing_indices, configs):
+    """
+    ``tensors`` with every sliced bond fixed to its value in ``configs``
+
+    Each axis in ``slicing_indices`` counts the unsliced tensor, so the selects on one
+    tensor run from its highest axis down. In any other order, a second sliced bond on the
+    same tensor would name an axis that the first select had shifted.
+    """
+    selects = {}
+    for sites, value in zip(slicing_indices.values(), configs):
+        for tid, ind in sites:
+            selects.setdefault(tid, []).append((ind, value))
+    sliced_tensors = tensors.copy()
+    for tid, tensor_selects in selects.items():
+        tensor = sliced_tensors[tid]
+        for ind, value in sorted(tensor_selects, reverse=True):
+            tensor = tensor.select(ind, value)
+        sliced_tensors[tid] = tensor.clone()
+    return sliced_tensors
+
 class TensorNetworkSimulation:
     def __init__(
             self, tensors, tensor_bonds, bond_dims, final_qubits, 
@@ -106,11 +126,7 @@ class TensorNetworkSimulation:
         slicing_bonds = list(self.slicing_indices.keys())
         for s in range(2**len(slicing_bonds)):
             configs = list(map(int, np.binary_repr(s, len(slicing_bonds))))
-            sliced_tensors = tensors.copy()
-            for x in range(len(slicing_bonds)):
-                bond = slicing_bonds[x]
-                for tid, ind in self.slicing_indices[bond]:
-                    sliced_tensors[tid] = sliced_tensors[tid].select(ind, configs[x]).clone()
+            sliced_tensors = _slice_tensors(tensors, self.slicing_indices, configs)
             collect_tensor += self.tensor_contraction_func(sliced_tensors, self.scheme)
         if len(self.output_bonds) > 0:
             collect_tensor = collect_tensor.permute(self.permute_dims)
@@ -202,11 +218,7 @@ def tensor_network_contraction(
     )
     for s in range(2**len(slicing_bonds)):
         configs = list(map(int, np.binary_repr(s, len(slicing_bonds))))
-        sliced_tensors = tensors.copy()
-        for x in range(len(slicing_bonds)):
-            bond = slicing_bonds[x]
-            for tid, ind in slicing_indices[bond]:
-                sliced_tensors[tid] = sliced_tensors[tid].select(ind, configs[x]).clone()
+        sliced_tensors = _slice_tensors(tensors, slicing_indices, configs)
         collect_tensor += tensor_contraction_func(sliced_tensors, scheme)
     if len(output_bonds) > 0:
         collect_tensor = collect_tensor.permute(permute_dims)

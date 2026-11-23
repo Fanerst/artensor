@@ -203,10 +203,26 @@ def contraction_scheme(ctree:ContractionTree):
     return scheme, output_bonds
 
 
-def tensor_contraction(tensors, scheme):
+BACKENDS = ("torch", "tenferro")
+
+
+def _check_backend(backend):
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}; choose one of {BACKENDS}")
+
+
+def tensor_contraction(tensors, scheme, backend="torch"):
     """
     perform the tensor contraction
+
+    ``backend="tenferro"`` runs the scheme on tenferro (the optional artensor-tenferro
+    extension, see ``tenferro_backend/``) on the tensors' device. It returns the same result
+    and leaves ``tensors`` unchanged, while the torch path overwrites its entries.
     """
+    _check_backend(backend)
+    if backend == "tenferro":
+        from . import tenferro_backend
+        return tenferro_backend.tensor_contraction(tensors, scheme)
     for s in scheme:
         i, j = s[0]
         einsum_eq = s[1]
@@ -273,7 +289,20 @@ def combine_bitstring(bitstring_i, bitstring_j, loc_i, loc_j):
     return ''.join([bitstring_i[loc_i.index(k)] if k in loc_i else bitstring_j[loc_j.index(k)] for k in range(len(loc_i) + len(loc_j))])
 
 
-def tensor_contraction_sparse(tensors, contraction_scheme, scientific_notation=False):
+def tensor_contraction_sparse(
+    tensors, contraction_scheme, scientific_notation=False, backend="torch"
+):
+    """
+    perform a sparse-state contraction compiled by ``contraction_scheme_sparse``
+
+    ``backend="tenferro"`` runs it on tenferro, as for ``tensor_contraction``.
+    """
+    _check_backend(backend)
+    if backend == "tenferro":
+        from . import tenferro_backend
+        return tenferro_backend.tensor_contraction_sparse(
+            tensors, contraction_scheme, scientific_notation
+        )
     if scientific_notation:
         factor = torch.tensor(0, dtype=tensors[0].dtype, device=tensors[0].device)
 

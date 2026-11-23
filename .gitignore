@@ -12,3 +12,6 @@ artensor_experimenting/
 artensor_legacy/
 asc/
 rbm/
+
+# Rust build output of the tenferro backend
+tenferro_backend/target/

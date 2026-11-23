@@ -1,6 +1,7 @@
 from .order_finder import find_order
 from .tensor_network import NumericalTensorNetwork
 from .contraction import (
+    _check_backend,
     contraction_scheme,
     contraction_scheme_sparse,
     tensor_contraction,
@@ -29,6 +30,26 @@ def get_bond_tensors(tensor_bonds):
         for j in tensor_bonds[i]:
             bond_tensors[j].add(i)
     return bond_tensors
+
+def _slice_tensors(tensors, slicing_indices, configs):
+    """
+    ``tensors`` with every sliced bond fixed to its value in ``configs``
+
+    Each axis in ``slicing_indices`` counts the unsliced tensor, so the selects on one
+    tensor run from its highest axis down. In any other order, a second sliced bond on the
+    same tensor would name an axis that the first select had shifted.
+    """
+    selects = {}
+    for sites, value in zip(slicing_indices.values(), configs):
+        for tid, ind in sites:
+            selects.setdefault(tid, []).append((ind, value))
+    sliced_tensors = tensors.copy()
+    for tid, tensor_selects in selects.items():
+        tensor = sliced_tensors[tid]
+        for ind, value in sorted(tensor_selects, reverse=True):
+            tensor = tensor.select(ind, value)
+        sliced_tensors[tid] = tensor.clone()
+    return sliced_tensors
 
 class TensorNetworkSimulation:
     def __init__(
@@ -87,17 +108,27 @@ class TensorNetworkSimulation:
             self.tensor_contraction_func = tensor_contraction_sparse
             assert len(self.bitstrings_sorted) <= self.max_bitstrings
     
-    def contraction(self, tensors=None, dtype=torch.complex64, device='cpu'):
-        if tensors is None:
-            tensors =  [
-                self.tensors[i].to(dtype).to(device) 
-                for i in range(len(self.tensors))
-            ]
-        else:
-            tensors = [
-                tensors[i].to(dtype).to(device) for i in range(len(tensors))
-            ]
+    def contraction(self, tensors=None, dtype=torch.complex64, device='cpu', backend='torch'):
+        """
+        Contract the network, summing over the sliced bonds.
 
+        ``backend='tenferro'`` runs the scheme and the slicing loop on tenferro (the
+        optional artensor-tenferro extension) on ``device``, and returns the same tensor.
+        """
+        _check_backend(backend)
+        source = self.tensors if tensors is None else tensors
+        if backend == 'tenferro':
+            from . import tenferro_backend
+            collect_tensor = tenferro_backend.sliced_contraction(
+                {i: source[i] for i in range(len(source))}, self.scheme,
+                self.slicing_indices, sparse=self.pattern == 'sparse',
+                dtype=dtype, device=device,
+            )
+            if len(self.output_bonds) > 0:
+                collect_tensor = collect_tensor.permute(self.permute_dims)
+            return collect_tensor
+
+        tensors = [source[i].to(dtype).to(device) for i in range(len(source))]
         collect_tensor_shape = [len(self.bitstrings_sorted)] + [2] * len(self.output_bonds) \
         if self.pattern == 'sparse' else [2] * len(self.output_bonds)
         collect_tensor = torch.zeros(
@@ -106,11 +137,7 @@ class TensorNetworkSimulation:
         slicing_bonds = list(self.slicing_indices.keys())
         for s in range(2**len(slicing_bonds)):
             configs = list(map(int, np.binary_repr(s, len(slicing_bonds))))
-            sliced_tensors = tensors.copy()
-            for x in range(len(slicing_bonds)):
-                bond = slicing_bonds[x]
-                for tid, ind in self.slicing_indices[bond]:
-                    sliced_tensors[tid] = sliced_tensors[tid].select(ind, configs[x]).clone()
+            sliced_tensors = _slice_tensors(tensors, self.slicing_indices, configs)
             collect_tensor += self.tensor_contraction_func(sliced_tensors, self.scheme)
         if len(self.output_bonds) > 0:
             collect_tensor = collect_tensor.permute(self.permute_dims)
@@ -150,8 +177,15 @@ class TensorNetworkSimulation:
 
 def tensor_network_contraction(
         tensors, tensor_bonds, bond_dims, final_qubits, bitstrings=[], sc_target=31, 
-        trial_num=8, alpha=0.0, dtype=torch.complex64, device='cpu'
+        trial_num=8, alpha=0.0, dtype=torch.complex64, device='cpu', backend='torch'
     ):
+    """
+    Find an order for the network and contract it, summing over the sliced bonds.
+
+    ``backend='tenferro'`` contracts on tenferro (the optional artensor-tenferro
+    extension) on ``device`` instead of with torch.einsum.
+    """
+    _check_backend(backend)
     pattern, max_bitstrings = check_bitstrings(bitstrings)
     numerical_tn = NumericalTensorNetwork(tensors, tensor_bonds, bond_dims, final_qubits)
     tensor_bonds_reorder, final_qubit_inds = numerical_tn._simplify(pattern)
@@ -165,8 +199,10 @@ def tensor_network_contraction(
     )
 
     slicing_indices = {}.fromkeys(slicing_bonds)
+    # tenferro takes its inputs from the host, so they stay there until it uploads them.
+    tensor_device = device if backend == 'torch' else 'cpu'
     tensors = {
-        i: numerical_tn.tensors[j].to(dtype).to(device) 
+        i: numerical_tn.tensors[j].to(dtype).to(tensor_device)
         for i, j in enumerate(numerical_tn.tensors.keys())
     }
 
@@ -195,19 +231,22 @@ def tensor_network_contraction(
         if pattern == 'sparse':
             permute_dims = [0] + [dim+1 for dim in permute_dims]
 
-    collect_tensor_shape = [max_bitstrings] + [2] * len(output_bonds) \
-    if pattern == 'sparse' else [2] * len(output_bonds)
-    collect_tensor = torch.zeros(
-        collect_tensor_shape, dtype=dtype, device=device
-    )
-    for s in range(2**len(slicing_bonds)):
-        configs = list(map(int, np.binary_repr(s, len(slicing_bonds))))
-        sliced_tensors = tensors.copy()
-        for x in range(len(slicing_bonds)):
-            bond = slicing_bonds[x]
-            for tid, ind in slicing_indices[bond]:
-                sliced_tensors[tid] = sliced_tensors[tid].select(ind, configs[x]).clone()
-        collect_tensor += tensor_contraction_func(sliced_tensors, scheme)
+    if backend == 'tenferro':
+        from . import tenferro_backend
+        collect_tensor = tenferro_backend.sliced_contraction(
+            tensors, scheme, slicing_indices, sparse=pattern == 'sparse',
+            dtype=dtype, device=device,
+        )
+    else:
+        collect_tensor_shape = [max_bitstrings] + [2] * len(output_bonds) \
+        if pattern == 'sparse' else [2] * len(output_bonds)
+        collect_tensor = torch.zeros(
+            collect_tensor_shape, dtype=dtype, device=device
+        )
+        for s in range(2**len(slicing_bonds)):
+            configs = list(map(int, np.binary_repr(s, len(slicing_bonds))))
+            sliced_tensors = _slice_tensors(tensors, slicing_indices, configs)
+            collect_tensor += tensor_contraction_func(sliced_tensors, scheme)
     if len(output_bonds) > 0:
         collect_tensor = collect_tensor.permute(permute_dims)
     return collect_tensor, bitstrings
@@ -215,11 +254,11 @@ def tensor_network_contraction(
 
 def quantum_circuit_simulation(
         circuit_filename, bitstrings=[], sc_target=31, trial_num=8, 
-        alpha=0.0, dtype=torch.complex64, device='cpu',
+        alpha=0.0, dtype=torch.complex64, device='cpu', backend='torch',
     ):
     circ = TensorNetworkCircuit(circuit_filename)
     tensors, tensor_bonds, bond_dims, final_qubits = circ.to_numerical_tn()
     return tensor_network_contraction(
         tensors, tensor_bonds, bond_dims, final_qubits, bitstrings, sc_target,
-        trial_num, alpha, dtype, device,
+        trial_num, alpha, dtype, device, backend,
     )

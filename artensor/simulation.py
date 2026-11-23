@@ -11,6 +11,7 @@ from .circuit import TensorNetworkCircuit
 import numpy as np
 from copy import deepcopy
 import torch
+import warnings
 
 def check_bitstrings(bitstrings):
     if len(bitstrings):
@@ -22,6 +23,40 @@ def check_bitstrings(bitstrings):
         max_bitstrings = 1
         pattern = 'normal'
     return pattern, max_bitstrings
+
+def get_open_bonds(tensor_bonds, final_qubits, bond_tensors=None):
+    """
+    Bonds of the final-qubit tensors that no other tensor carries
+
+    In the full-state ('normal') pattern these are the qubit axes of the result, so the
+    order finder must keep them out of slicing. Sparse-state networks have none, because
+    _simplify drops them.
+    """
+    if bond_tensors is None:
+        bond_tensors = get_bond_tensors(tensor_bonds)
+    return [
+        bond
+        for tensor_id in final_qubits
+        for bond in tensor_bonds[tensor_id]
+        if bond_tensors[bond] == {tensor_id}
+    ]
+
+def _full_state_sc_target(sc_target, open_bonds, bond_dims):
+    """
+    ``sc_target``, raised with a warning to the size of the result if it is below it
+
+    The result keeps all of ``open_bonds``, which are never sliced, so no slicing reaches
+    an ``sc_target`` below their size (n for an n-qubit full state).
+    """
+    output_sc = float(sum(np.log2(bond_dims[bond]) for bond in open_bonds))
+    if sc_target < output_sc:
+        warnings.warn(
+            f"sc_target={sc_target:g} is below the full state's own size "
+            f"2^{output_sc:g}; using sc_target={output_sc:g}",
+            stacklevel=3,
+        )
+        return output_sc
+    return sc_target
 
 def get_bond_tensors(tensor_bonds):
     bonds = list(set(sum(tensor_bonds.values(), start=[])))
@@ -70,12 +105,14 @@ class TensorNetworkSimulation:
             betas=np.linspace(0.1, 10, 100), slicing_repeat=4, start_seed=0, 
             alpha=32.0):
         bond_tensors = get_bond_tensors(self.tensor_bonds)
+        open_bonds = get_open_bonds(self.tensor_bonds, self.final_qubits, bond_tensors)
+        sc_target = _full_state_sc_target(sc_target, open_bonds, self.bond_dims)
         betas = np.linspace(3.0, 21.0, 61)
         order_slicing, slicing_bonds, self.ctree = find_order(
             self.tensor_bonds, self.bond_dims, self.final_qubits, 0, 
-            self.max_bitstrings, sc_target=sc_target, trials=trials, iters=iters, 
-            betas=betas, start_seed=start_seed, slicing_repeat=slicing_repeat, 
-            alpha=alpha
+            self.max_bitstrings, output_bonds=open_bonds, sc_target=sc_target,
+            trials=trials, iters=iters, betas=betas, start_seed=start_seed,
+            slicing_repeat=slicing_repeat, alpha=alpha
         )
 
         self.slicing_indices = {}.fromkeys(slicing_bonds)
@@ -190,12 +227,17 @@ def tensor_network_contraction(
     numerical_tn = NumericalTensorNetwork(tensors, tensor_bonds, bond_dims, final_qubits)
     tensor_bonds_reorder, final_qubit_inds = numerical_tn._simplify(pattern)
     bond_tensors_reorder = get_bond_tensors(tensor_bonds_reorder)
+    open_bonds = get_open_bonds(
+        tensor_bonds_reorder, final_qubit_inds, bond_tensors_reorder
+    )
+    sc_target = _full_state_sc_target(sc_target, open_bonds, numerical_tn.bond_dims)
 
     betas = np.linspace(3.0, 21.0, 61)
     order_slicing, slicing_bonds, ctree = find_order(
         deepcopy(tensor_bonds_reorder), deepcopy(numerical_tn.bond_dims), 
-        final_qubit_inds, 0, max_bitstrings, sc_target=sc_target, 
-        trials=trial_num, iters=50, betas=betas, start_seed=0, alpha=alpha
+        final_qubit_inds, 0, max_bitstrings, output_bonds=open_bonds,
+        sc_target=sc_target, trials=trial_num, iters=50, betas=betas,
+        start_seed=0, alpha=alpha
     )
 
     slicing_indices = {}.fromkeys(slicing_bonds)

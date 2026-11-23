@@ -6,6 +6,7 @@ from artensor import (
     ContractionTree,
     GreedyOrderFinder,
     MultiCostGreedyOrderFinder,
+    find_order,
 )
 from artensor.order_finder import score_fn
 from artensor.order_finder import _sliced_result_key
@@ -205,6 +206,26 @@ def test_slicing_never_selects_output_bonds(use_compiled):
     for bond in slicing_bonds:
         network.slicing(bond)
     tree = ContractionTree(network, order)
+    assert tree.tree_complexity()[1] <= sc_target
+    assert tree.tree[tree.all_tensors].contain_bonds == {"batch"}
+
+
+def test_find_order_never_slices_its_output_bonds():
+    network = batched_network()
+    sc_target = 5.0
+    order, slicing_bonds, tree = find_order(
+        network.tensor_bonds,
+        network.bond_dims,
+        output_bonds=["batch"],
+        sc_target=sc_target,
+        trials=2,
+        iters=2,
+        betas=np.linspace(0.1, 10.0, 8),
+        workers=1,
+    )
+    assert len(slicing_bonds) > 0
+    assert "batch" not in slicing_bonds
+    assert tree.tn.output_bonds == {"batch"}
     assert tree.tree_complexity()[1] <= sc_target
     assert tree.tree[tree.all_tensors].contain_bonds == {"batch"}
 

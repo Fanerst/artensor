@@ -377,16 +377,21 @@ def tree_update(vertex, tree, size, beta, initial_sc, rng, sc_target=30.0, alpha
 
 def find_order(
         tensor_bonds, bond_dims, final_qubits=None, seed=0, max_bitstrings=1,
-        **simulated_annnealing_args
+        output_bonds=None, **simulated_annnealing_args
     ):
     """
     Function wrapper for finding the contraction order of a given tensor network
+
+    output_bonds: iterable or None
+        bonds that stay open in the result, such as the qubit axes of a full state. They
+        are never contracted or sliced; slicing one would sum the result over it.
     """
     tensor_network = AbstractTensorNetwork(
         tensor_bonds,
         bond_dims,
         final_qubits,
-        max_bitstrings)
+        max_bitstrings,
+        output_bonds)
     # greedy_order = GreedyOrderFinder(tensor_network)
     # order, tc, sc = greedy_order('min_dim', seed)
     # ctree = ContractionTree(deepcopy(tensor_network), order, seed)

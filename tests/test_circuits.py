@@ -1,6 +1,10 @@
 # %%
 import numpy as np
+import pytest
+import torch
+from collections import Counter
 from pathlib import Path
+from artensor.simulation import TensorNetworkSimulation
 from artensor import (
     AbstractTensorNetwork, 
     NumericalTensorNetwork, 
@@ -58,6 +62,55 @@ def test_sparse_and_full_state_circuit_simulation():
         assert np.allclose(
             amplitudes[int(bitstring, 2)], amp, rtol=1e-4, atol=1e-6
         )
+
+
+CIRCUIT_N12 = Path(__file__).with_name('circuit_n12_m14_s0_e0_pEFGH.qsim')
+
+
+def assert_n12_full_state(result):
+    """One axis per qubit, and the amplitudes of correctness_table"""
+    assert tuple(result.shape) == (2,) * 12
+    amplitudes = result.reshape(-1).cpu().numpy()
+    for bitstring, amp in correctness_table.items():
+        assert np.allclose(
+            amplitudes[int(bitstring, 2)], amp, rtol=1e-4, atol=1e-6
+        )
+
+
+def test_full_state_slicing_keeps_the_qubit_bonds():
+    # iters=0 keeps the greedy order, whose largest tensor is nearly always above
+    # 2^12, so the search has to slice. It used to slice open qubit bonds as
+    # well, and the result came back summed over those qubits.
+    sliced_runs = 0
+    for start_seed in range(4):
+        sim = TensorNetworkSimulation.from_circuit_file(CIRCUIT_N12, [])
+        sim.prepare_contraction(
+            sc_target=12, trials=1, iters=0, start_seed=start_seed
+        )
+        bond_count = Counter(
+            bond for bonds in sim.tensor_bonds.values() for bond in bonds
+        )
+        open_bonds = {bond for bond, count in bond_count.items() if count == 1}
+        assert len(open_bonds) == 12
+        assert open_bonds.isdisjoint(sim.slicing_indices)
+        assert_n12_full_state(sim.contraction(dtype=torch.complex128))
+        sliced_runs += len(sim.slicing_indices) > 0
+    assert sliced_runs > 0
+
+
+def test_full_state_sc_target_below_the_output_is_raised():
+    # The 12-qubit result alone has sc 12, so sc_target 10 becomes 12, with a
+    # warning. It used to return 2^10 entries.
+    sim = TensorNetworkSimulation.from_circuit_file(CIRCUIT_N12, [])
+    with pytest.warns(UserWarning, match='below the full state'):
+        sim.prepare_contraction(sc_target=10, trials=1, iters=10)
+    assert_n12_full_state(sim.contraction(dtype=torch.complex128))
+
+    with pytest.warns(UserWarning, match='below the full state'):
+        result, _ = quantum_circuit_simulation(
+            CIRCUIT_N12, [], 10, trial_num=1, device='cpu'
+        )
+    assert_n12_full_state(result)
 
 # circuit_filename = 'circuit_n12_m14_s0_e0_pEFGH.qsim'
 # circ = TensorNetworkCircuit(circuit_filename, device='cpu')

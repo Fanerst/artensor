@@ -76,6 +76,12 @@ order, _ = simulate_annealing(
 )
 ```
 
+`find_order` takes the same `output_bonds`. The full-state simulations
+(`TensorNetworkSimulation`, `tensor_network_contraction` and
+`quantum_circuit_simulation` without bitstrings) pass the open qubit bonds, so
+the result keeps all n qubit axes. An `sc_target` below n is raised to n, with
+a warning.
+
 ### Reading an OME order
 
 OMEinsumContractionOrders JSON trees can be used directly without a separate

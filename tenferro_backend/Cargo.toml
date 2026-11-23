@@ -1,0 +1,32 @@
+[package]
+name = "artensor-tenferro"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "Apache-2.0"
+description = "tenferro contraction backend for artensor (a Python extension module)"
+repository = "https://github.com/Fanerst/artensor"
+publish = false
+
+[lib]
+name = "artensor_tenferro"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py39"] }
+numpy = "0.30"
+num-complex = "0.4"
+tenferro-tensor = "0.12"
+tenferro-runtime = "0.12"
+tenferro-cpu = "0.12"
+tenferro-einsum = "0.12"
+tenferro-gpu = { version = "0.12", optional = true }
+
+[features]
+# CUDA execution (`Backend("cuda:N")`). At run time it needs an NVIDIA driver, the CUDA 12
+# runtime libraries and cuTENSOR; see README.md.
+cuda = ["dep:tenferro-gpu", "tenferro-gpu/cuda", "tenferro-einsum/cuda"]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

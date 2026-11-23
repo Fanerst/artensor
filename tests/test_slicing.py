@@ -1,12 +1,25 @@
-"""Slicing several bonds of one tensor."""
+"""Slicing several bonds of one tensor, with every available backend."""
 
+import pytest
 import torch
 
 from artensor import tensor_contraction
 from artensor.simulation import TensorNetworkSimulation
 
+try:
+    import artensor_tenferro
+except ImportError:
+    artensor_tenferro = None
 
-def test_two_sliced_bonds_on_one_tensor():
+BACKENDS = [("torch", "cpu")]
+if artensor_tenferro is not None:
+    BACKENDS.append(("tenferro", "cpu"))
+    if artensor_tenferro.cuda_available() and torch.cuda.is_available():
+        BACKENDS.append(("tenferro", "cuda"))
+
+
+@pytest.mark.parametrize("backend, device", BACKENDS)
+def test_two_sliced_bonds_on_one_tensor(backend, device):
     generator = torch.Generator().manual_seed(1)
     t0 = torch.randn(2, 3, 2, dtype=torch.complex128, generator=generator)  # bonds p q r
     t1 = torch.randn(2, 4, dtype=torch.complex128, generator=generator)  # bonds p s
@@ -25,5 +38,5 @@ def test_two_sliced_bonds_on_one_tensor():
     simulation.output_bonds = []
     simulation.tensor_contraction_func = tensor_contraction
 
-    result = simulation.contraction(dtype=torch.complex128)
-    assert torch.allclose(result, expected)
+    result = simulation.contraction(dtype=torch.complex128, device=device, backend=backend)
+    assert torch.allclose(result.cpu(), expected)

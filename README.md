@@ -21,6 +21,16 @@ pip install -e .
 
 Please refer the `examples/sycamore.ipynb` for a detailed example. This example shows how to use this package to do full-amplitude and sparse-state simulation of the Sycamore circuit with 30 qubits and 14 cycles.
 
+## tenferro backend
+
+The contraction functions (`tensor_contraction`, `tensor_contraction_sparse`,
+`tensor_network_contraction`, `quantum_circuit_simulation` and
+`TensorNetworkSimulation.contraction`) take `backend="tenferro"`. It runs the contraction on
+[tenferro](https://github.com/tensor4all/tenferro-rs), a Rust tensor library, on the CPU or a
+CUDA GPU, instead of with `torch.einsum`. It needs the optional extension in
+`tenferro_backend/`; see [its README](tenferro_backend/README.md) for installation and for how it
+differs from the torch backend.
+
 ## Order finding
 
 The default greedy and TreeSA paths use the compiled C++ search core installed
